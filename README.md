@@ -36,8 +36,18 @@ bun install
 `bin/hview` は bun を自前で探すので、PATH に通しておくと楽です。
 
 ```bash
-ln -s /path/to/hview/bin/hview ~/.local/bin/hview   # 例
+ln -s "$(pwd)/bin/hview" ~/.local/bin/hview   # リポジトリ直下で実行する
 hview help
+```
+
+**リンク元は必ず絶対パスにしてください。** `ln -s ./bin/hview ~/.local/bin/hview` のように
+相対パスで張ると、`ln` は文字列をそのまま保存し、**リンク自身の置き場所からの相対**として
+解決します（この例では `~/.local/bin/bin/hview` を探しに行く）。リンク切れになると
+PATH 探索から除外されるため、`hview: command not found` ではなく
+「`command -v hview` が何も返さない」という分かりにくい形で失敗します。
+
+```bash
+ls -l ~/.local/bin/hview   # 向き先がリポジトリの絶対パスになっていることを確認する
 ```
 
 ### 2. hook を登録する
