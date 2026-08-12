@@ -1,0 +1,456 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hview — Claude Code のレスポンスを HTML でライブ表示する仕組みの計画</title>
+<style>
+  :root {
+    color-scheme: light dark;
+    --bg: #fbfbfa;
+    --panel: #ffffff;
+    --fg: #1f2328;
+    --muted: #6b7280;
+    --border: #e3e3e0;
+    --accent: #2f6feb;
+    --hot: #c2410c;
+    --ok: #15803d;
+    --code-bg: #f2f2ef;
+    --mark: #fff3b8;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17181a;
+      --panel: #1e1f22;
+      --fg: #e6e6e3;
+      --muted: #9aa0a6;
+      --border: #303237;
+      --accent: #79a9ff;
+      --hot: #ff9d6b;
+      --ok: #6ee7a8;
+      --code-bg: #26282c;
+      --mark: #4a4320;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 3rem 1.25rem 6rem;
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Noto Sans JP", "Yu Gothic", sans-serif;
+    font-size: 16px;
+    line-height: 1.85;
+    text-rendering: optimizeLegibility;
+  }
+  main { max-width: 780px; margin: 0 auto; }
+  header { margin-bottom: 2.5rem; }
+  h1 {
+    font-size: 1.9rem;
+    line-height: 1.4;
+    margin: 0 0 .6rem;
+    letter-spacing: .01em;
+  }
+  .meta { color: var(--muted); font-size: .85rem; margin: 0; }
+  h2 {
+    font-size: 1.25rem;
+    margin: 3rem 0 .9rem;
+    padding-bottom: .4rem;
+    border-bottom: 1px solid var(--border);
+  }
+  h3 { font-size: 1.02rem; margin: 2rem 0 .5rem; }
+  p, li { overflow-wrap: anywhere; }
+  ul, ol { padding-left: 1.4rem; }
+  li { margin: .3rem 0; }
+  a { color: var(--accent); text-decoration: none; border-bottom: 1px solid transparent; }
+  a:hover { border-bottom-color: currentColor; }
+  code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: .12em .38em;
+    font-family: "SFMono-Regular", Menlo, Consolas, monospace;
+    font-size: .87em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 1rem 1.1rem;
+    overflow-x: auto;
+    line-height: 1.65;
+  }
+  pre code { background: none; padding: 0; font-size: .84rem; }
+  blockquote {
+    margin: 1.2rem 0;
+    padding: .1rem 1.1rem;
+    border-left: 3px solid var(--border);
+    color: var(--muted);
+  }
+  .summary {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: 1.1rem 1.3rem;
+    margin: 0 0 1rem;
+  }
+  .summary h2 {
+    margin: 0 0 .5rem;
+    border: none;
+    padding: 0;
+    font-size: .78rem;
+    letter-spacing: .12em;
+    color: var(--muted);
+    text-transform: uppercase;
+  }
+  .summary p:last-child, .summary ul:last-child { margin-bottom: 0; }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1.2rem 0;
+    font-size: .92rem;
+    display: block;
+    overflow-x: auto;
+  }
+  th, td {
+    border: 1px solid var(--border);
+    padding: .55rem .8rem;
+    text-align: left;
+    vertical-align: top;
+  }
+  th { background: var(--code-bg); font-weight: 600; white-space: nowrap; }
+  mark { background: var(--mark); color: inherit; padding: 0 .2em; border-radius: 3px; }
+
+  /* --- 図 --- */
+  figure { margin: 2rem 0; }
+  figure.diagram {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1.4rem 1.1rem 1rem;
+  }
+  /* 横スクロールは svg だけに効かせる。figure ごと包むと figcaption まで流れて読めなくなる */
+  .diagram__scroll { overflow-x: auto; }
+  /* min-width は viewBox の幅と揃える。小さくすると SP で縮小され、文字が 8px 台になって読めない */
+  figure svg { display: block; width: 100%; height: auto; min-width: 640px; }
+  figcaption {
+    margin-top: .8rem;
+    color: var(--muted);
+    font-size: .84rem;
+    line-height: 1.6;
+    text-align: center;
+  }
+
+  /* --- コールアウト --- */
+  .callout {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-left: 4px solid var(--accent);
+    border-radius: 8px;
+    padding: .95rem 1.15rem;
+    margin: 1.4rem 0;
+  }
+  .callout--warn { border-left-color: var(--hot); }
+  .callout__label {
+    display: block;
+    margin-bottom: .35rem;
+    font-size: .72rem;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .callout > :last-child { margin-bottom: 0; }
+
+  /* --- バッジ --- */
+  .badge {
+    display: inline-block;
+    padding: .1rem .6rem;
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    background: var(--code-bg);
+    color: var(--muted);
+    font-size: .74rem;
+    white-space: nowrap;
+  }
+  .badge--ok { color: var(--ok); border-color: currentColor; background: none; }
+  .badge--todo { color: var(--hot); border-color: currentColor; background: none; }
+
+  /* --- 比較カード --- */
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 1rem;
+    margin: 1.5rem 0;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 1rem 1.15rem;
+  }
+  .card h3 { margin: 0 0 .5rem; font-size: .95rem; }
+  .card > :last-child { margin-bottom: 0; }
+
+  /* --- 番号付きステップ --- */
+  .steps { list-style: none; counter-reset: step; padding-left: 0; margin: 1.4rem 0; }
+  .steps > li {
+    counter-increment: step;
+    position: relative;
+    padding-left: 2.6rem;
+    margin: .9rem 0;
+  }
+  .steps > li::before {
+    content: counter(step);
+    position: absolute;
+    left: 0;
+    top: .2rem;
+    width: 1.75rem;
+    height: 1.75rem;
+    border-radius: 50%;
+    background: var(--accent);
+    color: var(--bg);
+    display: grid;
+    place-items: center;
+    font-size: .8rem;
+    font-weight: 700;
+  }
+
+  /* --- 数値の強調 --- */
+  .stat { font-size: 1.55rem; font-weight: 650; letter-spacing: -.01em; }
+  .tag {
+    display: inline-block;
+    background: var(--code-bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: .1rem .7rem;
+    font-size: .76rem;
+    color: var(--muted);
+    margin: 0 .3rem .3rem 0;
+  }
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.2rem;
+    border-top: 1px solid var(--border);
+    color: var(--muted);
+    font-size: .8rem;
+  }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>hview — Claude Code のレスポンスを HTML でライブ表示する仕組みの計画</h1>
+    <p class="meta">2026-08-12 15:04 / journey-web</p>
+  </header>
+
+  <section class="summary">
+    <h2>TL;DR</h2>
+    <ul>
+      <li>アプリ形式は <strong>CLI + ローカルビューア</strong>（Bun 製のローカルサーバ + ブラウザ 1 タブ）を採用します。Chrome 拡張・VS Code 拡張・デスクトップアプリと比べて実装が最も軽く、Claude Code のどのフロント（ターミナル / VS Code / デスクトップ）からでも使えるためです。</li>
+      <li>「HTML で返せ」のマークは 3 系統（インライン <code>#html</code> / <code>/hview on</code> のトグル / ビューア上のトグルボタン）用意しますが、実体はすべて <code>mode.json</code> の状態を <code>UserPromptSubmit</code> hook が読んで指示文を注入する 1 経路に統一します。</li>
+      <li>本ドキュメントは設計案の段階です。<mark>hook の入力仕様や port の空き状況など、実装前提となる事実の裏取りはまだ行っていません（未検証）。</mark></li>
+    </ul>
+  </section>
+
+  <h2>背景</h2>
+  <p>Claude Code とのやりとりは、ターミナル上の Markdown テキストが中心です。比較表・処理フロー・画面レイアウトのように「構造」を持つ情報は、テキストのままだと読み手が頭の中で組み立て直す必要があり、確認に時間がかかります。図つきの HTML を見ながら会話できれば、この負荷はかなり下がります。</p>
+  <p>既に <code>/html</code> スキル（<code>~/.claude/skills/html</code>）があり、会話の話題を 1 枚の HTML にまとめて Chrome で開くことはできます。ただしこれは<strong>単発の書き出し操作</strong>で、対話のたびに手で叩き直す必要があります。今回ほしいのは、会話を続けている間ずっと「最新の図が横に出ている」状態です。</p>
+
+  <h2>検討したこと</h2>
+  <p>要件は「アプリ形式は問わない」「マークをつけたら HTML が返り、アプリ内でレンダリング結果を確認できる」「簡単にファイルエクスポートできる」の 3 点で、最重視は「HTML を見ながら AI と対話できる」ことです。この観点で 4 形式を比較しました。</p>
+
+  <table>
+    <thead>
+      <tr><th>形式</th><th>対話しながら見られるか</th><th>実装コスト</th><th>難点</th><th>判定</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td>Chrome 拡張</td>
+        <td>claude.ai の Web UI 内なら可</td>
+        <td>中</td>
+        <td>ターミナルの Claude Code と繋がらない。普段の作業導線から外れる</td>
+        <td><span class="badge badge--todo">不採用</span></td>
+      </tr>
+      <tr>
+        <td>VS Code 拡張</td>
+        <td>1 ウィンドウで完結し理想的</td>
+        <td>大</td>
+        <td>拡張 API の実装と VSIX 配布が必要。VS Code を使う前提に縛られる</td>
+        <td><span class="badge">後回し</span></td>
+      </tr>
+      <tr>
+        <td>デスクトップアプリ</td>
+        <td>可（何でもできる）</td>
+        <td>特大</td>
+        <td>ターミナル自体を内包する必要があり、投資に見合わない</td>
+        <td><span class="badge badge--todo">不採用</span></td>
+      </tr>
+      <tr>
+        <td><strong>CLI + ローカルビューア</strong></td>
+        <td>ターミナルの横にブラウザを 1 枚置くだけ</td>
+        <td>小</td>
+        <td>ウィンドウが 2 つに分かれる</td>
+        <td><span class="badge badge--ok">採用</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <p>採用案の構成要素は、ローカルサーバ（<code>hview serve</code>）、Claude Code の hooks、スキル、ビューア画面の 4 つです。プロンプト送信からブラウザへの反映までの流れは次のとおりです。</p>
+
+  <figure class="diagram">
+   <div class="diagram__scroll">
+    <svg viewBox="0 0 640 210" role="img" aria-label="プロンプトの #html マークを hook が受けて HTML 出力を指示し、Claude Code が書き出した HTML が hview server 経由で WebSocket でブラウザに自動反映される流れ">
+      <defs>
+        <marker id="hvArw" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="currentColor" />
+        </marker>
+        <marker id="hvArwAcc" viewBox="0 0 10 10" refX="9" refY="5"
+                markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" fill="var(--accent)" />
+        </marker>
+      </defs>
+
+      <rect x="10" y="26" width="150" height="54" rx="8" fill="none" stroke="currentColor" />
+      <text x="85" y="45" text-anchor="middle" font-size="13" fill="currentColor"><tspan x="85">プロンプト</tspan><tspan x="85" dy="1.2em">#html マーク</tspan></text>
+
+      <rect x="245" y="26" width="150" height="54" rx="8" fill="none" stroke="currentColor" />
+      <text x="320" y="45" text-anchor="middle" font-size="13" fill="currentColor"><tspan x="320">UserPromptSubmit</tspan><tspan x="320" dy="1.2em">hook</tspan></text>
+
+      <rect x="480" y="26" width="150" height="54" rx="8" fill="none" stroke="currentColor" />
+      <text x="555" y="57" text-anchor="middle" font-size="13" fill="currentColor">Claude Code</text>
+
+      <line x1="160" y1="53" x2="238" y2="53" stroke="currentColor" marker-end="url(#hvArw)" />
+      <text x="199" y="42" text-anchor="middle" font-size="11" fill="currentColor">送信</text>
+
+      <line x1="395" y1="53" x2="473" y2="53" stroke="currentColor" marker-end="url(#hvArw)" />
+      <text x="434" y="42" text-anchor="middle" font-size="11" fill="currentColor">指示を注入</text>
+
+      <polyline points="555,80 555,112 85,112 85,131" fill="none" stroke="currentColor" marker-end="url(#hvArw)" />
+      <text x="320" y="104" text-anchor="middle" font-size="11" fill="currentColor">HTML を Write</text>
+
+      <rect x="10" y="138" width="150" height="54" rx="8" fill="none" stroke="currentColor" />
+      <text x="85" y="157" text-anchor="middle" font-size="13" fill="currentColor"><tspan x="85">.claude/hview/</tspan><tspan x="85" dy="1.2em">turn-N.html</tspan></text>
+
+      <rect x="245" y="138" width="150" height="54" rx="8" fill="none" stroke="var(--accent)" stroke-width="2" />
+      <text x="320" y="157" text-anchor="middle" font-size="13" fill="var(--accent)"><tspan x="320">hview server</tspan><tspan x="320" dy="1.2em">:5757</tspan></text>
+
+      <rect x="480" y="138" width="150" height="54" rx="8" fill="none" stroke="currentColor" />
+      <text x="555" y="169" text-anchor="middle" font-size="13" fill="currentColor">ブラウザ ビューア</text>
+
+      <line x1="160" y1="165" x2="238" y2="165" stroke="var(--accent)" marker-end="url(#hvArwAcc)" />
+      <text x="199" y="154" text-anchor="middle" font-size="11" fill="var(--accent)">hook 通知</text>
+
+      <line x1="395" y1="165" x2="473" y2="165" stroke="var(--accent)" marker-end="url(#hvArwAcc)" />
+      <text x="434" y="154" text-anchor="middle" font-size="11" fill="var(--accent)">WebSocket</text>
+    </svg>
+   </div>
+    <figcaption>ユーザーが操作するのは左上の「マークをつけて送る」だけで、書き出し以降は hook とサーバが自動でブラウザまで運びます。青い経路がライブ更新の要です。</figcaption>
+  </figure>
+
+  <h3>トリガー（マーク）の 3 系統</h3>
+  <p>要件では「スキルでもトグルボタンでもよい」とされているので、使い分けられるよう 3 つ用意します。いずれも最終的には <code>.claude/hview/mode.json</code> の状態に集約され、判定ロジックは 1 箇所で済みます。</p>
+
+  <table>
+    <thead>
+      <tr><th>系統</th><th>操作</th><th>有効範囲</th><th>向いている場面</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>インラインマーク</td><td>プロンプト内に <code>#html</code> と書く</td><td>そのターンのみ</td><td>普段はテキストで、この 1 回だけ図がほしいとき</td></tr>
+      <tr><td>スキルトグル</td><td><code>/hview on</code> / <code>/hview off</code></td><td>解除するまで継続</td><td>設計検討など、しばらく図を見続けたいとき</td></tr>
+      <tr><td>ビューアのボタン</td><td>ブラウザ画面右上のトグル</td><td>解除するまで継続</td><td>ブラウザを見ている流れのまま切り替えたいとき</td></tr>
+    </tbody>
+  </table>
+
+  <h3>hook が注入する指示の要旨</h3>
+  <p>モードが ON のとき、<code>UserPromptSubmit</code> hook が次の内容を追加コンテキストとして渡します。ここが仕組み全体の心臓部です。</p>
+  <ul>
+    <li>回答の実体は<strong>単一ファイルの HTML</strong> として <code>.claude/hview/&lt;session-id&gt;/turn-&lt;n&gt;.html</code> に Write すること</li>
+    <li>チャット本文には 2〜3 行の要約とファイル名だけを書き、<strong>HTML の中身を本文に貼らない</strong>こと（トークンの二重消費を避けるため）</li>
+    <li>比較・フロー・前後差分は図（インライン SVG）にすること。外部 CDN・外部フォント・外部画像は使わないこと</li>
+    <li>ライト / ダーク両対応にすること。既存の <code>~/.claude/skills/html/assets/template.html</code> を土台にして見た目を揃えること</li>
+  </ul>
+
+  <h3>ディレクトリ構成</h3>
+  <pre><code>.claude/hview/
+├── mode.json                 # ON/OFF と出力モード（毎ターン新規 / 同一ファイル更新）
+└── &lt;session-id&gt;/
+    ├── index.json            # ターン一覧（タイトル・時刻・ファイル名）
+    ├── turn-001.html
+    └── turn-002.html</code></pre>
+
+  <h3>ビューア画面</h3>
+  <p>ブラウザ 1 タブに収めます。左にターン履歴、中央にプレビュー、上部に操作系という構成です。</p>
+  <ul>
+    <li><strong>自動更新</strong>：WebSocket で通知を受けて差し替えます。スクロール位置は維持します</li>
+    <li><strong>ターン履歴</strong>：過去のターンの図に戻れます。「さっきの比較表もう一回見せて」を会話なしで解決できます</li>
+    <li><strong>ピン留め</strong>：特定の HTML を固定し、新しいターンが来ても勝手に切り替わらないようにします。<strong>これが「見ながら対話する」の要</strong>です</li>
+    <li><strong>出力モードの切替</strong>：毎ターン新規ファイル / 同一ファイルを更新、の 2 モード。後者にすると「今の図のここを直して」がそのまま成立します</li>
+    <li><strong>セキュリティ</strong>：プレビューは <code>sandbox="allow-scripts"</code>（<code>allow-same-origin</code> は付けない）の iframe に隔離し、CSP で外部通信を止めます</li>
+  </ul>
+
+  <h3>エクスポート</h3>
+  <p>生成物が最初から単一ファイル完結なので、エクスポートは実質「置き場所を選ぶだけ」になります。</p>
+  <ul>
+    <li>HTML をそのままダウンロード（自己完結なので受け取った人がオフラインで開ける）</li>
+    <li><code>~/Desktop/codes/html-output</code> へ保存（既存 <code>/html</code> スキルの出力先と揃える）</li>
+    <li>絶対パスをクリップボードへコピー</li>
+    <li>ブラウザの印刷ダイアログ経由で PDF 化</li>
+  </ul>
+  <p>社内共有が必要なときは、保存したファイルを既存の <code>push-to-prototypes</code> スキルに渡せばそのまま静的サイトとして公開できます。</p>
+
+  <h2>決定事項</h2>
+  <div class="callout">
+    <span class="callout__label">決定</span>
+    <p><strong>CLI + ローカルビューア方式</strong>（Bun 製サーバ + Claude Code hooks + ブラウザビューア）で進めます。VS Code 拡張版のフロントエンドは Phase 3 の任意項目として残し、まず作りません。実装はまだ着手しておらず、以下は設計案の確定という意味での決定です。</p>
+  </div>
+  <div class="callout callout--warn">
+    <span class="callout__label">未決</span>
+    <p>コードの置き場所（独立リポジトリにするか <code>~/.claude/tools/</code> 配下に置くか）と、hook をユーザー設定・プロジェクト設定のどちらに登録するかは未決です。後者は<strong>全プロジェクトに影響が及ぶ</strong>ため、決める前に影響範囲の確認が要ります。</p>
+  </div>
+
+  <h2>根拠</h2>
+  <p>CLI + ローカルビューアを選んだ理由は 3 つです。</p>
+  <ul>
+    <li><strong>フロントを選ばない</strong>：Claude Code はターミナル・VS Code・デスクトップアプリのどれからでも使えます。hooks とファイル書き出しに乗せておけば、どの入り口からでも同じビューアに反映されます。拡張として作ると、その拡張のホストに縛られます</li>
+    <li><strong>配布・審査が要らない</strong>：Chrome 拡張も VS Code 拡張もパッケージングと配布の手間がかかります。ローカルサーバなら <code>bun</code> で起動するだけで、修正もその場で反映できます</li>
+    <li><strong>既存資産をそのまま使える</strong>：<code>/html</code> スキルのテンプレートと作図ルールがすでに整っており、「単一ファイル完結・外部依存なし・ライト/ダーク対応」という制約も既に守られています。ビューア側で追加のレンダリング処理を持たずに済みます</li>
+  </ul>
+  <p>逆に VS Code 拡張を捨てきらないのは、ウィンドウが 2 つに分かれる点が唯一かつ実害のある欠点だからです。運用してみて画面の行き来が煩わしければ、サーバ側はそのままにビューアだけを Webview として作り直せます。</p>
+
+  <h2>実装の進め方</h2>
+  <ol class="steps">
+    <li><strong>Phase 0 — PoC</strong>：<code>hview serve</code> でファイルを配信し、ブラウザで手動リロードして表示できるところまで。hooks はまだ繋がず、この方式で本当に読みやすくなるかだけを確かめます</li>
+    <li><strong>Phase 1 — MVP</strong>：hooks 連携（<code>UserPromptSubmit</code> での指示注入 / <code>PostToolUse</code> での通知）、WebSocket による自動更新、HTML ダウンロードと Desktop 保存。ここまでで要件 3 点は満たします</li>
+    <li><strong>Phase 2 — 対話性の強化</strong>：ターン履歴、ピン留め、ビューア上のトグルボタン、同一ファイル更新モード。「見ながら対話する」の質はこの段階で決まります</li>
+    <li><strong>Phase 3 — 任意</strong>：プレビュー内の要素を選んで「ここを直して」と指示を送り返す逆方向フィードバック、VS Code Webview 版のフロントエンド。Phase 2 まで運用してから必要性を判断します</li>
+  </ol>
+
+  <h2>残課題</h2>
+  <p>設計の前提として置いているものの、まだ裏を取っていない項目です。Phase 0 の前に確認します。</p>
+  <table>
+    <thead>
+      <tr><th>項目</th><th>内容</th><th>状態</th></tr>
+    </thead>
+    <tbody>
+      <tr><td>hook の入力仕様</td><td>hook に渡される JSON からセッション識別子を取得できるか。取れない場合、ターンをどう束ねるか代替が要る</td><td><span class="badge badge--todo">未確認</span></td></tr>
+      <tr><td>PostToolUse の matcher</td><td><code>Write</code> ツールの実行を捕捉して、対象パスをサーバに通知できるか</td><td><span class="badge badge--todo">未確認</span></td></tr>
+      <tr><td>指示注入の効き目</td><td>「HTML の中身を本文に貼るな」という指示がどの程度守られるか。守られないとトークンを二重に消費する</td><td><span class="badge badge--todo">未検証</span></td></tr>
+      <tr><td>iframe の制約</td><td><code>allow-same-origin</code> なしの sandbox で、図の中の JavaScript がどこまで動くか</td><td><span class="badge badge--todo">未検証</span></td></tr>
+      <tr><td>port の選定</td><td>既定 <code>5757</code> が空いているか。起動時の生存確認と <code>--port</code> 指定を用意する</td><td><span class="badge badge--todo">未確認</span></td></tr>
+      <tr><td>既存 <code>/html</code> との住み分け</td><td>単発書き出しは従来どおり <code>/html</code>、常時表示は <code>hview</code>、という分担で運用が回るか</td><td><span class="badge">要運用確認</span></td></tr>
+    </tbody>
+  </table>
+
+  <h2>参照</h2>
+  <ul>
+    <li><code>~/.claude/skills/html/SKILL.md</code> — 既存の HTML 書き出しスキル。作図ルールをそのまま流用します</li>
+    <li><code>~/.claude/skills/html/assets/template.html</code> — 出力の共通テンプレート</li>
+    <li><code>~/.claude/settings.json</code> — hooks の登録先（現在 <code>UserPromptSubmit</code> と <code>Stop</code> が登録済み）</li>
+    <li><code>~/.claude/skills/push-to-prototypes/</code> — 生成した HTML を社内公開する場合の受け渡し先</li>
+  </ul>
+
+  <footer>Generated by Claude Code / <code>/html</code></footer>
+</main>
+</body>
+</html>

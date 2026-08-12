@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>hview</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='13'>&#128506;</text></svg>">
+<link rel="stylesheet" href="/viewer.css">
+</head>
+<body>
+<header class="bar">
+  <div class="bar__left">
+    <span class="logo">hview</span>
+    <span id="conn" class="dot dot--off" title="接続状態"></span>
+    <select id="session" class="select" aria-label="セッション"></select>
+  </div>
+  <div class="bar__right">
+    <label class="toggle">
+      <input type="checkbox" id="modeToggle">
+      <span class="toggle__track"><span class="toggle__thumb"></span></span>
+      <span class="toggle__label">HTML モード</span>
+    </label>
+    <select id="outputMode" class="select" aria-label="出力モード">
+      <option value="per-turn">毎ターン新規</option>
+      <option value="single-file">同一ファイル更新</option>
+    </select>
+  </div>
+</header>
+
+<div class="layout">
+  <aside class="side">
+    <div class="side__head">
+      <span>ターン履歴</span>
+      <button id="reindex" class="btn btn--ghost" title="ディスク上の HTML を読み直す">再読込</button>
+    </div>
+    <ol id="turns" class="turns"></ol>
+    <p id="emptyHint" class="hint">
+      まだ HTML がありません。<br>
+      プロンプトに <code>#html</code> を付けて送るか、上の「HTML モード」を ON にしてください。
+    </p>
+  </aside>
+
+  <main class="main">
+    <div class="tools">
+      <span id="currentTitle" class="tools__title">—</span>
+      <div class="tools__actions">
+        <button id="pin" class="btn" aria-pressed="false" title="固定すると新しいターンが来ても切り替わりません">📌 ピン留め</button>
+        <button id="download" class="btn" title="HTML をダウンロード">⬇ ダウンロード</button>
+        <button id="export" class="btn" title="~/Desktop/codes/html-output に保存">💾 Desktop へ保存</button>
+        <button id="copyPath" class="btn" title="絶対パスをコピー">📋 パス</button>
+        <button id="print" class="btn" title="印刷ダイアログ（PDF 化）">🖨 印刷</button>
+      </div>
+    </div>
+    <div class="stage">
+      <iframe id="preview" sandbox="allow-scripts allow-modals" title="プレビュー"></iframe>
+      <div id="placeholder" class="placeholder">
+        <p>ここに Claude Code が書き出した HTML が表示されます。</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="/viewer.js"></script>
+</body>
+</html>
