@@ -77,6 +77,22 @@ code {
   max-width: 22rem;
 }
 
+/* 未読バッジ。セレクタを畳んだままでも他セッションの動きに気づけるように */
+.badge {
+  background: var(--code-bg);
+  color: var(--hot);
+  border: 1px solid var(--hot);
+  border-radius: 999px;
+  padding: .12rem .5rem;
+  font: inherit;
+  font-size: .74rem;
+  line-height: 1.5;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.badge:hover { background: var(--hot); color: var(--panel); }
+.badge[hidden] { display: none; }
+
 .toggle { display: inline-flex; align-items: center; gap: .45rem; cursor: pointer; user-select: none; }
 .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
 .toggle__track {
@@ -185,6 +201,7 @@ code {
 .toast {
   position: fixed;
   right: 1rem; bottom: 1rem;
+  display: flex; align-items: center; gap: .7rem;
   background: var(--panel);
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
@@ -199,3 +216,20 @@ code {
   max-width: 28rem;
 }
 .toast--show { opacity: 1; transform: none; }
+/* 切り替えボタン付きのときだけクリックを受け付ける */
+.toast--action { pointer-events: auto; }
+
+.toast__btn {
+  flex: 0 0 auto;
+  background: var(--accent);
+  color: var(--panel);
+  border: 0;
+  border-radius: 6px;
+  padding: .28rem .6rem;
+  font: inherit;
+  font-size: .78rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.toast__btn:hover { filter: brightness(1.1); }
+.toast__btn[hidden] { display: none; }

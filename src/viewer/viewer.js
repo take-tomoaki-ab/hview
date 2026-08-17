@@ -6,6 +6,7 @@
   const el = {
     conn: $('conn'),
     session: $('session'),
+    unread: $('unread'),
     modeToggle: $('modeToggle'),
     outputMode: $('outputMode'),
     turns: $('turns'),
@@ -20,13 +21,23 @@
     preview: $('preview'),
     placeholder: $('placeholder'),
     toast: $('toast'),
+    toastText: $('toastText'),
+    toastAction: $('toastAction'),
   };
+
+  /** セッションセレクタの先頭に置く「追従」用の値。セッション ID は英数字系のみなので衝突しない。 */
+  const FOLLOW = '__follow__';
+  const FOLLOW_KEY = 'hview.follow';
 
   /** @type {{projectRoot:string, mode:any, sessions:any[], exportDir:string}|null} */
   let state = null;
   let sessionId = null;
   let currentFile = null;
   let pinned = false;
+  /** ON の間、新しいターンが届いたセッションへ自動で移る。既定は OFF（読んでいる画面をさらわない） */
+  let follow = readFollow();
+  /** まだ見ていないターンが届いたセッションの ID。切り替えたら消す。 */
+  const unread = new Set();
   /** ファイルごとのスクロール位置。iframe は opaque origin なので親からは読めず、
    *  bridge スクリプトの postMessage で受け取った値をここに溜める。 */
   const scrollMemory = new Map();
@@ -70,18 +81,28 @@
     el.modeToggle.checked = !!state.mode.enabled;
     el.outputMode.value = state.mode.outputMode;
 
+    // 未選択のまま、あるいは消えたセッションを指したまま turn を受けると
+    // 「見ている当のセッション」を他人扱いしてしまう。判定の前に現実へ合わせておく
+    if (!sessionId || !state.sessions.some((s) => s.sessionId === sessionId)) {
+      sessionId = state.sessions.length ? state.sessions[0].sessionId : null;
+    }
+
+    // 追従・未読の判定はセレクタを描く前に済ませる。ここで sessionId が動きうる
+    const turn = msg && msg.type === 'turn' ? msg : null;
+    if (turn) routeTurn(turn);
+
     renderSessions();
     const session = currentSession();
     renderTurns(session);
 
     if (!session) { showPlaceholder(); return; }
 
-    // 新しいターンが来たとき。ピン留め中は切り替えない
-    if (msg && msg.type === 'turn' && msg.sessionId === session.sessionId) {
-      if (pinned && currentFile && currentFile !== msg.turn.file) {
-        toast(`新しいターン「${msg.turn.title}」が届きました（ピン留め中のため切り替えません）`);
+    // 選択中セッションに新しいターンが来たとき。ピン留め中は切り替えない
+    if (turn && turn.sessionId === session.sessionId) {
+      if (pinned && currentFile && currentFile !== turn.turn.file) {
+        toast(`新しいターン「${turn.turn.title}」が届きました（ピン留め中のため切り替えません）`);
       } else {
-        show(msg.turn.file, { keepScroll: msg.turn.file === currentFile });
+        show(turn.turn.file, { keepScroll: turn.turn.file === currentFile });
       }
       return;
     }
@@ -95,6 +116,31 @@
     }
   }
 
+  /**
+   * 届いたターンの扱いを決める。
+   * - 選択中セッション: 未読を落とすだけ（表示の更新は applyState 側）
+   * - 追従中かつピン留めなし: そのセッションへ選択を移す
+   * - それ以外: 未読マーカーを立て、切り替えボタン付きのトーストで知らせる
+   */
+  function routeTurn(msg) {
+    if (msg.sessionId === sessionId) {
+      unread.delete(msg.sessionId);
+      return;
+    }
+    if (follow && !pinned) {
+      sessionId = msg.sessionId;
+      currentFile = null; // 別セッションのファイルなのでスクロール位置は引き継がない
+      unread.delete(msg.sessionId);
+      return;
+    }
+    unread.add(msg.sessionId);
+    const why = pinned ? '（ピン留め中のため切り替えません）' : '';
+    toast(
+      `セッション ${short(msg.sessionId)} に新しいターン「${msg.turn.title}」が届きました${why}`,
+      { label: '切り替え', run: () => selectSession(msg.sessionId) },
+    );
+  }
+
   function currentSession() {
     if (!state || !state.sessions.length) return null;
     return state.sessions.find((s) => s.sessionId === sessionId) || state.sessions[0];
@@ -104,18 +150,54 @@
     const sessions = state.sessions;
     if (!sessions.length) {
       el.session.innerHTML = '<option>セッションなし</option>';
+      renderUnread();
       return;
     }
-    if (!sessionId || !sessions.some((s) => s.sessionId === sessionId)) {
-      sessionId = sessions[0].sessionId;
+    const followLabel = `⟳ 最新を自動で追う（${short(sessionId)}）`;
+    const options = [
+      `<option value="${FOLLOW}"${follow ? ' selected' : ''}>${esc(followLabel)}</option>`,
+      ...sessions.map((s) => {
+        const mark = unread.has(s.sessionId) ? '● ' : '';
+        const label = `${mark}${short(s.sessionId)} (${s.turns.length} ターン)`;
+        const selected = !follow && s.sessionId === sessionId ? ' selected' : '';
+        return `<option value="${esc(s.sessionId)}"${selected}>${esc(label)}</option>`;
+      }),
+    ];
+    el.session.innerHTML = options.join('');
+    renderUnread();
+  }
+
+  /** セレクタは畳まれていると未読が見えないので、隣にバッジも出す。 */
+  function renderUnread() {
+    const n = state ? state.sessions.filter((s) => unread.has(s.sessionId)).length : 0;
+    el.unread.hidden = n === 0;
+    el.unread.textContent = `● 未読 ${n} セッション`;
+  }
+
+  function short(id) { return id ? `${id.slice(0, 8)}…` : '—'; }
+
+  /** セレクタの値（セッション ID か FOLLOW）を選択として適用する。 */
+  function selectSession(value) {
+    if (!state) return;
+    if (value === FOLLOW) {
+      follow = true;
+      const latest = state.sessions[0];
+      if (latest && latest.sessionId !== sessionId) {
+        sessionId = latest.sessionId;
+        currentFile = null;
+      }
+      unread.clear();
+      toast('新しいターンが届いたセッションへ自動で切り替えます');
+    } else {
+      follow = false;
+      if (value !== sessionId) {
+        sessionId = value;
+        currentFile = null;
+      }
+      unread.delete(value);
     }
-    el.session.innerHTML = sessions
-      .map((s) => {
-        const n = s.turns.length;
-        const label = `${s.sessionId.slice(0, 8)}… (${n} ターン)`;
-        return `<option value="${esc(s.sessionId)}"${s.sessionId === sessionId ? ' selected' : ''}>${esc(label)}</option>`;
-      })
-      .join('');
+    saveFollow();
+    applyState(state);
   }
 
   function renderTurns(session) {
@@ -195,10 +277,13 @@
     if (btn) show(btn.dataset.file);
   });
 
-  el.session.addEventListener('change', () => {
-    sessionId = el.session.value;
-    currentFile = null;
-    applyState(state);
+  el.session.addEventListener('change', () => selectSession(el.session.value));
+
+  el.unread.addEventListener('click', () => {
+    if (!state) return;
+    // sessions は更新が新しい順。未読のうち一番新しいものへ移る
+    const next = state.sessions.find((s) => unread.has(s.sessionId));
+    if (next) selectSession(next.sessionId);
   });
 
   el.modeToggle.addEventListener('change', async () => {
@@ -215,7 +300,7 @@
     pinned = !pinned;
     el.pin.setAttribute('aria-pressed', String(pinned));
     el.pin.textContent = pinned ? '📌 固定中' : '📌 ピン留め';
-    toast(pinned ? 'この HTML を固定しました。新しいターンでも切り替わりません' : 'ピン留めを解除しました');
+    toast(pinned ? 'この HTML を固定しました。どのセッションの新しいターンでも切り替わりません' : 'ピン留めを解除しました');
   });
 
   el.download.addEventListener('click', () => {
@@ -256,11 +341,39 @@
   // ---------- 小物 ----------
 
   let toastTimer = null;
-  function toast(text) {
-    el.toast.textContent = text;
+  let toastRun = null;
+
+  /** @param {{label:string, run:() => void}} [action] 付けるとクリックできるトーストになる */
+  function toast(text, action) {
+    el.toastText.textContent = text;
+    toastRun = action ? action.run : null;
+    el.toastAction.hidden = !action;
+    if (action) el.toastAction.textContent = action.label;
     el.toast.classList.add('toast--show');
+    el.toast.classList.toggle('toast--action', !!action);
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.toast.classList.remove('toast--show'), 3800);
+    // 押させたいトーストは少し長く出す
+    toastTimer = setTimeout(hideToast, action ? 9000 : 3800);
+  }
+
+  function hideToast() {
+    clearTimeout(toastTimer);
+    toastRun = null;
+    el.toast.classList.remove('toast--show', 'toast--action');
+  }
+
+  el.toastAction.addEventListener('click', () => {
+    const run = toastRun;
+    hideToast();
+    if (run) run();
+  });
+
+  function readFollow() {
+    try { return localStorage.getItem(FOLLOW_KEY) === '1'; } catch { return false; }
+  }
+
+  function saveFollow() {
+    try { localStorage.setItem(FOLLOW_KEY, follow ? '1' : '0'); } catch { /* 保存できなくても動く */ }
   }
 
   function esc(s) {

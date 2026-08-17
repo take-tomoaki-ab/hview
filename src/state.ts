@@ -1,4 +1,13 @@
-import { mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import {
+  closeSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { hviewRoot, indexFile, modeFile, sessionDir } from './paths.ts';
 
@@ -43,15 +52,62 @@ export function readMode(projectRoot: string): Mode {
   }
 }
 
+/**
+ * mode.json は「読む → マージ → 書く」なので、複数セッションから同時に叩くと
+ * 片方の更新が消える。ロックで読み書きを直列化し、書き込み自体も
+ * 一時ファイル → rename にして、途中の状態を他プロセスに読ませない。
+ */
 export function writeMode(projectRoot: string, patch: Partial<Omit<Mode, 'updatedAt'>>): Mode {
-  const next: Mode = {
-    ...readMode(projectRoot),
-    ...patch,
-    updatedAt: new Date().toISOString(),
-  };
   mkdirSync(hviewRoot(projectRoot), { recursive: true });
-  writeFileSync(modeFile(projectRoot), `${JSON.stringify(next, null, 2)}\n`);
-  return next;
+  return withModeLock(projectRoot, () => {
+    const next: Mode = {
+      ...readMode(projectRoot),
+      ...patch,
+      updatedAt: new Date().toISOString(),
+    };
+    const dest = modeFile(projectRoot);
+    const tmp = `${dest}.${process.pid}.tmp`;
+    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
+    renameSync(tmp, dest);
+    return next;
+  });
+}
+
+const LOCK_TRIES = 50;
+const LOCK_WAIT_MS = 20;
+
+/**
+ * `open(..., 'wx')` を排他の要にした素朴なロック。
+ * 取れないまま 1 秒待ったらロック無しで進める。プロセスがロックを持ったまま死んでも
+ * 詰まらせないためで、その場合の最悪は従来と同じ挙動に戻るだけ。
+ */
+function withModeLock<T>(projectRoot: string, fn: () => T): T {
+  const lock = `${modeFile(projectRoot)}.lock`;
+  for (let i = 0; i < LOCK_TRIES; i++) {
+    let fd: number;
+    try {
+      fd = openSync(lock, 'wx');
+    } catch {
+      sleepSync(LOCK_WAIT_MS);
+      continue;
+    }
+    try {
+      return fn();
+    } finally {
+      closeSync(fd);
+      try {
+        unlinkSync(lock);
+      } catch {
+        // 誰かに消されていても困らない
+      }
+    }
+  }
+  return fn();
+}
+
+/** hook は同期処理なので、await せずに待てる手段がいる。 */
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
 export function readIndex(projectRoot: string, sessionId: string): SessionIndex {
