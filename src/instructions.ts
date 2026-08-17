@@ -75,6 +75,11 @@ export function buildInjection(input: InjectionInput): string {
       'localStorage・cookie・fetch は使えません。図の描画は SVG と CSS だけで完結させてください。',
   );
   lines.push(
+    'このターンのプロンプトが hview 自体の操作（モードの ON/OFF、出力モードの変更、状態確認）なら、' +
+      'HTML は書かずに実行結果だけを簡潔に答えてください。' +
+      'モードを切る操作でそのターンだけ HTML が残るのは分かりにくいためです。',
+  );
+  lines.push(
     trigger === 'inline'
       ? '今回は `#html` によるこのターン限りの指定です。次のターンは通常のテキスト回答に戻してください。'
       : 'hview モードが ON の間、以降のターンも同じ形式で回答してください。',
@@ -93,4 +98,18 @@ export function buildInjection(input: InjectionInput): string {
  */
 export function hasInlineMark(prompt: string): boolean {
   return /(?<![A-Za-z0-9_#])#html(?![A-Za-z0-9_-])/i.test(prompt);
+}
+
+/**
+ * hview 自体を操作するターンかどうか。
+ * `UserPromptSubmit` hook はスキルが `hview off` を実行する前に走るので、
+ * mode.json だけを見ると「OFF にするターン」にまで指示を注入してしまう。
+ * `/hview off` `hview status` `hview mode single-file` のように
+ * 先頭が hview で始まるプロンプトを、注入の対象から外すための判定。
+ *
+ * `hviewer` や `hview.ts` のような別語には反応させたくないので、
+ * 直後は空白・文末・句読点に限る。ドットは `hview.ts` を巻き込むため入れない。
+ */
+export function isHviewControlPrompt(prompt: string): boolean {
+  return /^\s*\/?hview(?=$|[\s、。!?！？:：])/i.test(prompt);
 }
