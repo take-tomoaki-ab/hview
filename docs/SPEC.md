@@ -39,13 +39,27 @@ CLI + ローカルビューアです。Chrome 拡張・VS Code 拡張・デス�
 ### 2. 状態ファイル
 
 ```text
-.claude/hview/
+<project>/.claude/hview/
 ├── mode.json                 # ON/OFF と出力モード（毎ターン新規 / 同一ファイル更新）
+├── server.json               # 起動中の port と pid
 └── <session-id>/
     ├── index.json            # ターン一覧（タイトル・時刻・ファイル名）
     ├── turn-001.html
     └── turn-002.html
+
+~/.claude/hview/              # プロジェクト横断。HTML は置かない
+├── servers.json              # 起動中サーバのレジストリ（port / pid / projectRoot）
+└── projects.json             # ビューアが扱ったプロジェクトの一覧
 ```
+
+hook は `install-hooks --user` で全プロジェクトに入る一方、`hview serve` はどこか 1 プロジェクトで
+起動する。この非対称を埋めるのが `~/.claude/hview/` の 2 ファイルで、次の 2 つを成立させる。
+
+- **通知の宛先が分かる** … 通知元プロジェクトに `server.json` が無くても、レジストリから起動中サーバの
+  port を引ける（既定値へのフォールバックだけだと、`--port` を変えていた場合に無音で落ちる）
+- **サーバが複数プロジェクトを面倒見る** … `/api/notify` は projectRoot を運び、サーバは projectRoot ごとに
+  状態を持つ。受け取った projectRoot は絶対パスかつ `.claude/hview` が実在することを検証し、
+  URL には projectRoot ではなくハッシュ（`projectId`）を載せてパストラバーサルを塞ぐ
 
 ### 3. トリガー（3 系統）
 
@@ -60,7 +74,10 @@ CLI + ローカルビューアです。Chrome 拡張・VS Code 拡張・デス�
 ### 4. hook
 
 - `UserPromptSubmit` … モードが ON のとき、追加コンテキストとして指示文を注入する
-- `PostToolUse`（`Write` matcher）… 対象ディレクトリへの書き込みを検知して `POST /notify` する
+- `PostToolUse`（`Write` matcher）… 対象ディレクトリへの書き込みを検知して `POST /notify` する。
+  body には projectRoot を載せる。サーバが未起動なら無音で終わるが、**応答したうえで断られた場合は
+  stderr に理由を出す**（HTML は書けているのに出ない状態を無音にすると、ユーザーからは
+  「書き出されなかった」ようにしか見えない）
 
 注入する指示の要旨は次のとおりです。
 
@@ -80,6 +97,9 @@ CLI + ローカルビューアです。Chrome 拡張・VS Code 拡張・デス�
 - 複数セッション … 同じプロジェクトで複数の Claude セッションが動くことを想定する。
   既定は「選択中のセッションを勝手に切り替えず、他セッションのターンは未読マーカーと通知で知らせる」。
   セレクタの「最新を自動で追う」を選べば追従に切り替わる。モード（`mode.json`）はプロジェクトに 1 つで共有する
+- 複数プロジェクト … 1 つのビューアで複数プロジェクトのターンを扱う。セッションセレクタを
+  プロジェクトごとの `optgroup` で束ね、上部にプロジェクト名を出す。モードの操作は
+  **選択中セッションのプロジェクト**に向ける
 - セキュリティ … プレビューは `sandbox="allow-scripts"`（`allow-same-origin` は付けない）の iframe に隔離し、CSP で外部通信を止める
 
 ### 6. エクスポート
