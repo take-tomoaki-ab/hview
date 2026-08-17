@@ -1,5 +1,5 @@
 import { relative } from 'node:path';
-import { buildInjection, hasInlineMark } from './instructions.ts';
+import { buildInjection, hasInlineMark, isHviewControlPrompt } from './instructions.ts';
 import { findProjectRoot, parseHviewPath } from './paths.ts';
 import { resolvePort } from './server-info.ts';
 import { nextTurnFile, readMode } from './state.ts';
@@ -26,15 +26,22 @@ async function readStdin(): Promise<HookPayload> {
  * UserPromptSubmit hook。
  * mode.json が ON か、プロンプトに `#html` があるときだけ additionalContext を返す。
  * それ以外は何も出力しない（= 素通し）。
+ *
+ * ただし hview 自体を操作するターンは例外で、常に素通しする。
+ * この hook はスキルが `hview off` を走らせる前に評価されるため、
+ * mode.json だけを見ていると OFF にするターンにまで注入してしまう。
  */
 export async function runUserPromptSubmitHook(): Promise<void> {
   const payload = await readStdin();
   const sessionId = payload.session_id;
   if (!sessionId) return;
 
+  const prompt = payload.prompt ?? '';
+  if (isHviewControlPrompt(prompt)) return;
+
   const projectRoot = findProjectRoot(payload.cwd ?? process.cwd());
   const mode = readMode(projectRoot);
-  const inline = hasInlineMark(payload.prompt ?? '');
+  const inline = hasInlineMark(prompt);
   if (!mode.enabled && !inline) return;
 
   const file = nextTurnFile(projectRoot, sessionId, mode.outputMode);

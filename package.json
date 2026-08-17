@@ -9,6 +9,7 @@
   },
   "scripts": {
     "start": "bun run src/cli.ts serve",
+    "test": "bun test",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
