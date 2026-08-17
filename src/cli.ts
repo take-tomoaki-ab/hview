@@ -12,8 +12,9 @@ import {
   writeSettings,
   type Scope,
 } from './install-hooks.ts';
-import { DEFAULT_PORT, findProjectRoot, hviewRoot } from './paths.ts';
-import { isPortTaken, pingServer, readServerInfo } from './server-info.ts';
+import { DEFAULT_PORT, findProjectRoot, hviewRoot, projectLabel } from './paths.ts';
+import { readKnownProjects } from './projects.ts';
+import { isPortTaken, liveServers, pingServer, readServerInfo, resolvePort } from './server-info.ts';
 import { reindexAll, startServer } from './server.ts';
 import { listSessions, readMode, writeMode } from './state.ts';
 
@@ -69,7 +70,10 @@ async function main() {
   const projectRoot = findProjectRoot(
     typeof flags.get('dir') === 'string' ? (flags.get('dir') as string) : process.cwd(),
   );
-  const port = Number(flags.get('port') ?? DEFAULT_PORT) || DEFAULT_PORT;
+  const portFlag = flags.get('port');
+  const port = Number(portFlag ?? DEFAULT_PORT) || DEFAULT_PORT;
+  /** --port を明示していないときは、起動中サーバ（共通レジストリ含む）から引く。 */
+  const target = () => (portFlag !== undefined ? port : resolvePort(projectRoot));
 
   switch (command) {
     case undefined:
@@ -82,16 +86,16 @@ async function main() {
       return serve(projectRoot, port, flags.get('open') === true);
 
     case 'open':
-      return openViewer(projectRoot, port);
+      return openViewer(target());
 
     case 'status':
-      return status(projectRoot, port);
+      return status(projectRoot, target());
 
     case 'on':
     case 'off': {
       const mode = writeMode(projectRoot, { enabled: command === 'on' });
       console.log(`HTML モード: ${mode.enabled ? 'ON' : 'OFF'}（${projectRoot}）`);
-      await notifyServer(projectRoot, port);
+      await notifyServer(projectRoot, target());
       return;
     }
 
@@ -103,7 +107,7 @@ async function main() {
       }
       const mode = writeMode(projectRoot, { outputMode: value });
       console.log(`出力モード: ${mode.outputMode}`);
-      await notifyServer(projectRoot, port);
+      await notifyServer(projectRoot, target());
       return;
     }
 
@@ -122,7 +126,9 @@ async function main() {
 
 async function serve(projectRoot: string, port: number, open: boolean) {
   if (await pingServer(port)) {
+    // 1 つのサーバが複数プロジェクトを扱えるので、そのまま使ってもらってよい
     console.error(`ポート ${port} では既に hview が動いています。http://localhost:${port} を開いてください。`);
+    console.error('このプロジェクトのターンも、そのビューアに表示されます。');
     process.exit(1);
   }
   if (await isPortTaken(port)) {
@@ -130,7 +136,10 @@ async function serve(projectRoot: string, port: number, open: boolean) {
     process.exit(1);
   }
 
-  const found = reindexAll(projectRoot);
+  // 起動プロジェクトのほか、過去にターンを受けた他プロジェクトも拾い直す。
+  // hook は install-hooks --user で全プロジェクトに入るので、サーバは 1 プロジェクト専用にはできない
+  const others = readKnownProjects().filter((p) => p !== projectRoot);
+  const found = reindexAll(projectRoot) + others.reduce((n, p) => n + reindexAll(p), 0);
   startServer({ projectRoot, port });
 
   const mode = readMode(projectRoot);
@@ -139,17 +148,16 @@ async function serve(projectRoot: string, port: number, open: boolean) {
   console.log(`  state      ${hviewRoot(projectRoot)}`);
   console.log(`  mode       ${mode.enabled ? 'ON' : 'OFF'} / ${mode.outputMode}`);
   console.log(`  既存の HTML ${found} 件を読み込みました`);
+  for (const p of others) console.log(`  他プロジェクト ${projectLabel(p)} (${p})`);
   if (open) await openUrl(`http://localhost:${port}`);
 }
 
-async function openViewer(projectRoot: string, port: number) {
-  const info = readServerInfo(projectRoot);
-  const target = info?.port ?? port;
-  if (!(await pingServer(target))) {
+async function openViewer(port: number) {
+  if (!(await pingServer(port))) {
     console.error(`hview サーバが見つかりません。先に \`hview serve\` を実行してください。`);
     process.exit(1);
   }
-  await openUrl(`http://localhost:${target}`);
+  await openUrl(`http://localhost:${port}`);
 }
 
 async function openUrl(url: string) {
@@ -162,18 +170,27 @@ async function openUrl(url: string) {
 }
 
 async function status(projectRoot: string, port: number) {
-  const info = readServerInfo(projectRoot);
-  const target = info?.port ?? port;
-  const alive = await pingServer(target);
+  const alive = await pingServer(port);
   const mode = readMode(projectRoot);
   const sessions = listSessions(projectRoot);
+  const own = readServerInfo(projectRoot);
 
   console.log(`project    ${projectRoot}`);
-  console.log(`server     ${alive ? `動作中 http://localhost:${target} (pid ${info?.pid ?? '?'})` : '停止中'}`);
+  console.log(`server     ${alive ? `動作中 http://localhost:${port}` : '停止中'}`);
   console.log(`mode       ${mode.enabled ? 'ON' : 'OFF'} / ${mode.outputMode}`);
   console.log(`sessions   ${sessions.length} 件`);
   for (const s of sessions.slice(0, 5)) {
     console.log(`  ${s.sessionId}  最終更新 ${s.updatedAt}`);
+  }
+
+  // このプロジェクトで serve していなくても、他プロジェクトのサーバが通知を受けてくれる。
+  // どこへ届くのかが分からないと「無音で消えた」ように見えるので必ず出す
+  const running = liveServers();
+  console.log(`servers    ${running.length} 件が起動中${own ? '' : '（このプロジェクトでは serve していません）'}`);
+  for (const s of running) {
+    const here = s.projectRoot === projectRoot ? ' ← このプロジェクト' : '';
+    const used = s.port === port ? ' ← 通知先' : '';
+    console.log(`  :${s.port}  pid ${s.pid}  ${s.projectRoot}${here}${used}`);
   }
 
   for (const scope of ['project', 'user'] as Scope[]) {
@@ -184,12 +201,12 @@ async function status(projectRoot: string, port: number) {
 }
 
 async function notifyServer(projectRoot: string, port: number) {
-  const target = readServerInfo(projectRoot)?.port ?? port;
   try {
-    await fetch(`http://127.0.0.1:${target}/api/mode`, {
+    // projectRoot を渡す。別プロジェクトで動いているサーバでも、どのプロジェクトの mode かが伝わる
+    await fetch(`http://127.0.0.1:${port}/api/mode`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({}),
+      body: JSON.stringify({ projectRoot }),
       signal: AbortSignal.timeout(800),
     });
   } catch {

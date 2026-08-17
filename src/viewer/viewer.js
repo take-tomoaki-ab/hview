@@ -5,6 +5,7 @@
   const $ = (id) => document.getElementById(id);
   const el = {
     conn: $('conn'),
+    project: $('project'),
     session: $('session'),
     unread: $('unread'),
     modeToggle: $('modeToggle'),
@@ -25,18 +26,19 @@
     toastAction: $('toastAction'),
   };
 
-  /** セッションセレクタの先頭に置く「追従」用の値。セッション ID は英数字系のみなので衝突しない。 */
+  /** セッションセレクタの先頭に置く「追従」用の値。ref は `<projectId>/<sessionId>` なので衝突しない。 */
   const FOLLOW = '__follow__';
   const FOLLOW_KEY = 'hview.follow';
 
-  /** @type {{projectRoot:string, mode:any, sessions:any[], exportDir:string}|null} */
+  /** @type {{port:number, projectRoot:string, projectId:string, exportDir:string, projects:any[]}|null} */
   let state = null;
-  let sessionId = null;
+  /** 選択中のセッション。プロジェクトをまたぐので projectId と対で持つ。 */
+  let sel = null;
   let currentFile = null;
   let pinned = false;
   /** ON の間、新しいターンが届いたセッションへ自動で移る。既定は OFF（読んでいる画面をさらわない） */
   let follow = readFollow();
-  /** まだ見ていないターンが届いたセッションの ID。切り替えたら消す。 */
+  /** まだ見ていないターンが届いたセッションの ref。切り替えたら消す。 */
   const unread = new Set();
   /** ファイルごとのスクロール位置。iframe は opaque origin なので親からは読めず、
    *  bridge スクリプトの postMessage で受け取った値をここに溜める。 */
@@ -74,31 +76,68 @@
     return res.json();
   }
 
+  // ---------- セッションの取り回し ----------
+
+  function ref(projectId, sessionId) { return `${projectId}/${sessionId}`; }
+
+  function projects() { return state ? state.projects : []; }
+
+  /** 全プロジェクトのセッションを、更新が新しい順に平らに並べる。 */
+  function allSessions() {
+    const out = [];
+    for (const p of projects()) {
+      for (const s of p.sessions) out.push({ ...s, project: p });
+    }
+    return out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  function findSession(target) {
+    if (!target) return null;
+    for (const p of projects()) {
+      if (p.projectId !== target.projectId) continue;
+      const s = p.sessions.find((x) => x.sessionId === target.sessionId);
+      if (s) return { ...s, project: p };
+    }
+    return null;
+  }
+
+  function currentSession() {
+    return findSession(sel) || allSessions()[0] || null;
+  }
+
+  /** モードの操作対象。セッションが無ければ serve を起動したプロジェクトに向ける。 */
+  function currentProject() {
+    const s = currentSession();
+    if (s) return s.project;
+    return projects().find((p) => p.primary) || projects()[0] || null;
+  }
+
   // ---------- 状態の反映 ----------
 
   function applyState(next, msg) {
     state = next;
-    el.modeToggle.checked = !!state.mode.enabled;
-    el.outputMode.value = state.mode.outputMode;
 
     // 未選択のまま、あるいは消えたセッションを指したまま turn を受けると
     // 「見ている当のセッション」を他人扱いしてしまう。判定の前に現実へ合わせておく
-    if (!sessionId || !state.sessions.some((s) => s.sessionId === sessionId)) {
-      sessionId = state.sessions.length ? state.sessions[0].sessionId : null;
+    if (!findSession(sel)) {
+      const latest = allSessions()[0];
+      sel = latest ? { projectId: latest.projectId, sessionId: latest.sessionId } : null;
     }
 
-    // 追従・未読の判定はセレクタを描く前に済ませる。ここで sessionId が動きうる
+    // 追従・未読の判定はセレクタを描く前に済ませる。ここで sel が動きうる
     const turn = msg && msg.type === 'turn' ? msg : null;
     if (turn) routeTurn(turn);
 
-    renderSessions();
     const session = currentSession();
+    renderProject();
+    renderSessions();
+    renderMode();
     renderTurns(session);
 
     if (!session) { showPlaceholder(); return; }
 
     // 選択中セッションに新しいターンが来たとき。ピン留め中は切り替えない
-    if (turn && turn.sessionId === session.sessionId) {
+    if (turn && turn.projectId === session.projectId && turn.sessionId === session.sessionId) {
       if (pinned && currentFile && currentFile !== turn.turn.file) {
         toast(`新しいターン「${turn.turn.title}」が届きました（ピン留め中のため切り替えません）`);
       } else {
@@ -123,81 +162,122 @@
    * - それ以外: 未読マーカーを立て、切り替えボタン付きのトーストで知らせる
    */
   function routeTurn(msg) {
-    if (msg.sessionId === sessionId) {
-      unread.delete(msg.sessionId);
+    const r = ref(msg.projectId, msg.sessionId);
+    if (sel && r === ref(sel.projectId, sel.sessionId)) {
+      unread.delete(r);
       return;
     }
     if (follow && !pinned) {
-      sessionId = msg.sessionId;
+      sel = { projectId: msg.projectId, sessionId: msg.sessionId };
       currentFile = null; // 別セッションのファイルなのでスクロール位置は引き継がない
-      unread.delete(msg.sessionId);
+      unread.delete(r);
       return;
     }
-    unread.add(msg.sessionId);
+    unread.add(r);
     const why = pinned ? '（ピン留め中のため切り替えません）' : '';
     toast(
-      `セッション ${short(msg.sessionId)} に新しいターン「${msg.turn.title}」が届きました${why}`,
-      { label: '切り替え', run: () => selectSession(msg.sessionId) },
+      `${describe(msg.projectId, msg.sessionId)} に新しいターン「${msg.turn.title}」が届きました${why}`,
+      { label: '切り替え', run: () => selectSession(r) },
     );
   }
 
-  function currentSession() {
-    if (!state || !state.sessions.length) return null;
-    return state.sessions.find((s) => s.sessionId === sessionId) || state.sessions[0];
+  /** トーストに出す「どこで起きたか」。プロジェクトが複数あるときだけ名前を添える。 */
+  function describe(projectId, sessionId) {
+    const p = projects().find((x) => x.projectId === projectId);
+    const name = p && projects().length > 1 ? `${p.label} の ` : '';
+    return `${name}セッション ${short(sessionId)}`;
+  }
+
+  /** 見ているプロジェクトの表示。1 つしか無いときは出さない（今までの見た目のまま）。 */
+  function renderProject() {
+    const p = currentProject();
+    const many = projects().length > 1;
+    el.project.hidden = !(many && p);
+    if (many && p) {
+      el.project.textContent = p.label;
+      el.project.title = p.projectRoot;
+    }
+  }
+
+  function renderMode() {
+    const p = currentProject();
+    const mode = p ? p.mode : { enabled: false, outputMode: 'per-turn' };
+    el.modeToggle.checked = !!mode.enabled;
+    el.outputMode.value = mode.outputMode;
+    const scope = p && projects().length > 1 ? `${p.label} の ` : '';
+    el.modeToggle.title = `${scope}HTML モード`;
   }
 
   function renderSessions() {
-    const sessions = state.sessions;
-    if (!sessions.length) {
+    const list = projects();
+    const total = list.reduce((n, p) => n + p.sessions.length, 0);
+    if (!total) {
       el.session.innerHTML = '<option>セッションなし</option>';
       renderUnread();
       return;
     }
-    const followLabel = `⟳ 最新を自動で追う（${short(sessionId)}）`;
+
+    const followLabel = `⟳ 最新を自動で追う（${short(sel && sel.sessionId)}）`;
     const options = [
       `<option value="${FOLLOW}"${follow ? ' selected' : ''}>${esc(followLabel)}</option>`,
-      ...sessions.map((s) => {
-        const mark = unread.has(s.sessionId) ? '● ' : '';
-        const label = `${mark}${short(s.sessionId)} (${s.turns.length} ターン)`;
-        const selected = !follow && s.sessionId === sessionId ? ' selected' : '';
-        return `<option value="${esc(s.sessionId)}"${selected}>${esc(label)}</option>`;
-      }),
     ];
+
+    // プロジェクトが複数あるときは optgroup で束ねる。どのプロジェクトのセッションか分からないと選べない
+    const many = list.filter((p) => p.sessions.length > 0).length > 1;
+    for (const p of list) {
+      if (!p.sessions.length) continue;
+      const body = p.sessions.map((s) => sessionOption(p, s)).join('');
+      options.push(many ? `<optgroup label="${esc(p.label)}">${body}</optgroup>` : body);
+    }
     el.session.innerHTML = options.join('');
     renderUnread();
   }
 
+  function sessionOption(p, s) {
+    const r = ref(p.projectId, s.sessionId);
+    const mark = unread.has(r) ? '● ' : '';
+    const label = `${mark}${short(s.sessionId)} (${s.turns.length} ターン)`;
+    const selected = !follow && sel && r === ref(sel.projectId, sel.sessionId) ? ' selected' : '';
+    return `<option value="${esc(r)}"${selected}>${esc(label)}</option>`;
+  }
+
   /** セレクタは畳まれていると未読が見えないので、隣にバッジも出す。 */
   function renderUnread() {
-    const n = state ? state.sessions.filter((s) => unread.has(s.sessionId)).length : 0;
+    const n = allSessions().filter((s) => unread.has(ref(s.projectId, s.sessionId))).length;
     el.unread.hidden = n === 0;
     el.unread.textContent = `● 未読 ${n} セッション`;
   }
 
   function short(id) { return id ? `${id.slice(0, 8)}…` : '—'; }
 
-  /** セレクタの値（セッション ID か FOLLOW）を選択として適用する。 */
+  /** セレクタの値（ref か FOLLOW）を選択として適用する。 */
   function selectSession(value) {
     if (!state) return;
     if (value === FOLLOW) {
       follow = true;
-      const latest = state.sessions[0];
-      if (latest && latest.sessionId !== sessionId) {
-        sessionId = latest.sessionId;
+      const latest = allSessions()[0];
+      if (latest && (!sel || ref(latest.projectId, latest.sessionId) !== ref(sel.projectId, sel.sessionId))) {
+        sel = { projectId: latest.projectId, sessionId: latest.sessionId };
         currentFile = null;
       }
       unread.clear();
       toast('新しいターンが届いたセッションへ自動で切り替えます');
     } else {
       follow = false;
-      if (value !== sessionId) {
-        sessionId = value;
+      const [projectId, sessionId] = splitRef(value);
+      if (!sel || projectId !== sel.projectId || sessionId !== sel.sessionId) {
+        sel = { projectId, sessionId };
         currentFile = null;
       }
       unread.delete(value);
     }
     saveFollow();
     applyState(state);
+  }
+
+  function splitRef(value) {
+    const i = String(value).indexOf('/');
+    return i < 0 ? [value, ''] : [value.slice(0, i), value.slice(i + 1)];
   }
 
   function renderTurns(session) {
@@ -233,13 +313,24 @@
     const session = currentSession();
     if (!session) return showPlaceholder();
     const keepScroll = !!(opts && opts.keepScroll);
-    pendingRestore = keepScroll ? scrollMemory.get(key(session.sessionId, file)) || 0 : 0;
+    pendingRestore = keepScroll ? scrollMemory.get(key(session, file)) || 0 : 0;
     currentFile = file;
     el.preview.hidden = false;
     el.placeholder.hidden = true;
     // 同じ URL でも確実に読み直させたいのでキャッシュバスターを付ける
-    el.preview.src = `/f/${encodeURIComponent(session.sessionId)}/${encodeURIComponent(file)}?t=${Date.now()}`;
+    el.preview.src = `${filePath('/f/', session, file)}?t=${Date.now()}`;
     markCurrent();
+  }
+
+  function filePath(prefix, session, file) {
+    return (
+      prefix +
+      encodeURIComponent(session.projectId) +
+      '/' +
+      encodeURIComponent(session.sessionId) +
+      '/' +
+      encodeURIComponent(file)
+    );
   }
 
   function showPlaceholder() {
@@ -249,7 +340,7 @@
     el.currentTitle.textContent = '—';
   }
 
-  function key(sid, file) { return `${sid}/${file}`; }
+  function key(session, file) { return `${session.projectId}/${session.sessionId}/${file}`; }
 
   // ---------- iframe からの postMessage ----------
 
@@ -259,7 +350,7 @@
     const session = currentSession();
     if (!session || !currentFile) return;
     if (d.type === 'scroll') {
-      scrollMemory.set(key(session.sessionId, currentFile), d.y);
+      scrollMemory.set(key(session, currentFile), d.y);
     }
     if (d.type === 'ready' && pendingRestore) {
       el.preview.contentWindow.postMessage(
@@ -281,18 +372,23 @@
 
   el.unread.addEventListener('click', () => {
     if (!state) return;
-    // sessions は更新が新しい順。未読のうち一番新しいものへ移る
-    const next = state.sessions.find((s) => unread.has(s.sessionId));
-    if (next) selectSession(next.sessionId);
+    // 更新が新しい順に見て、未読のうち一番新しいものへ移る
+    const next = allSessions().find((s) => unread.has(ref(s.projectId, s.sessionId)));
+    if (next) selectSession(ref(next.projectId, next.sessionId));
   });
 
   el.modeToggle.addEventListener('change', async () => {
-    const r = await post('/api/mode', { enabled: el.modeToggle.checked });
-    toast(r.mode.enabled ? 'HTML モードを ON にしました' : 'HTML モードを OFF にしました');
+    const p = currentProject();
+    if (!p) return;
+    const r = await post('/api/mode', { projectId: p.projectId, enabled: el.modeToggle.checked });
+    const scope = projects().length > 1 ? `${p.label} の ` : '';
+    toast(r.mode.enabled ? `${scope}HTML モードを ON にしました` : `${scope}HTML モードを OFF にしました`);
   });
 
   el.outputMode.addEventListener('change', async () => {
-    await post('/api/mode', { outputMode: el.outputMode.value });
+    const p = currentProject();
+    if (!p) return;
+    await post('/api/mode', { projectId: p.projectId, outputMode: el.outputMode.value });
     toast(el.outputMode.value === 'single-file' ? '同一ファイル更新モード' : '毎ターン新規モード');
   });
 
@@ -306,20 +402,24 @@
   el.download.addEventListener('click', () => {
     const session = currentSession();
     if (!session || !currentFile) return;
-    location.href = `/d/${encodeURIComponent(session.sessionId)}/${encodeURIComponent(currentFile)}`;
+    location.href = filePath('/d/', session, currentFile);
   });
 
   el.export.addEventListener('click', async () => {
     const session = currentSession();
     if (!session || !currentFile) return;
-    const r = await post('/api/export', { sessionId: session.sessionId, file: currentFile });
+    const r = await post('/api/export', {
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+      file: currentFile,
+    });
     toast(r.ok ? `保存しました: ${r.path}` : `保存に失敗しました: ${r.error}`);
   });
 
   el.copyPath.addEventListener('click', async () => {
     const session = currentSession();
-    if (!session || !currentFile || !state) return;
-    const path = `${state.projectRoot}/.claude/hview/${session.sessionId}/${currentFile}`;
+    if (!session || !currentFile) return;
+    const path = `${session.project.projectRoot}/.claude/hview/${session.sessionId}/${currentFile}`;
     try {
       await navigator.clipboard.writeText(path);
       toast(`パスをコピーしました: ${path}`);

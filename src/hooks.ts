@@ -65,7 +65,11 @@ export async function runUserPromptSubmitHook(): Promise<void> {
 /**
  * PostToolUse hook（matcher: Write|Edit|MultiEdit）。
  * `.claude/hview/<session>/<file>.html` への書き込みだけをサーバへ通知する。
- * サーバが落ちていても黙って終わる（hook がユーザーの作業を止めないため）。
+ *
+ * サーバが落ちているときは黙って終わる（hook がユーザーの作業を止めないため）。
+ * ただしサーバが応答したうえで受け取りを断った場合は stderr に出す。
+ * HTML は書けているのにビューアに出ない状態を無音で済ませると、
+ * ユーザーからは「HTML が書き出されなかった」ようにしか見えない。
  */
 export async function runPostToolUseHook(): Promise<void> {
   const payload = await readStdin();
@@ -77,8 +81,9 @@ export async function runPostToolUseHook(): Promise<void> {
   if (!parsed) return;
 
   const port = resolvePort(projectRoot);
+  let res: Response;
   try {
-    await fetch(`http://127.0.0.1:${port}/api/notify`, {
+    res = await fetch(`http://127.0.0.1:${port}/api/notify`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({
@@ -90,5 +95,19 @@ export async function runPostToolUseHook(): Promise<void> {
     });
   } catch {
     // サーバ未起動。ファイルは書けているので次に serve したときに拾える
+    return;
   }
+
+  if (res.ok) return;
+
+  const detail = await res.text().catch(() => '');
+  process.stderr.write(
+    `[hview] HTML は書き出せましたが、ビューアへの通知が拒否されました（HTTP ${res.status}）。\n` +
+      `  file:   ${filePath}\n` +
+      `  server: http://127.0.0.1:${port}\n` +
+      (detail ? `  detail: ${detail.slice(0, 300)}\n` : '') +
+      `  このプロジェクトで \`hview serve\` を起動するか、ビューアの「再読込」を押してください。\n`,
+  );
+  // 非 0 で終わると Claude Code が stderr をユーザーに見せる。無音で落とさないための 1
+  process.exitCode = 1;
 }

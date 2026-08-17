@@ -93,6 +93,22 @@ code {
 .badge:hover { background: var(--hot); color: var(--panel); }
 .badge[hidden] { display: none; }
 
+/* 表示中のプロジェクト名。1 サーバで複数プロジェクトを見るときだけ出す */
+.chip {
+  background: var(--code-bg);
+  color: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: .12rem .55rem;
+  font-size: .74rem;
+  line-height: 1.5;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.chip[hidden] { display: none; }
+
 .toggle { display: inline-flex; align-items: center; gap: .45rem; cursor: pointer; user-select: none; }
 .toggle input { position: absolute; opacity: 0; width: 0; height: 0; }
 .toggle__track {
