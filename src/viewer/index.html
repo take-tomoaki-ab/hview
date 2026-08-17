@@ -13,6 +13,7 @@
     <span class="logo">hview</span>
     <span id="conn" class="dot dot--off" title="接続状態"></span>
     <select id="session" class="select" aria-label="セッション"></select>
+    <button id="unread" class="badge" type="button" hidden title="未読のあるセッションへ切り替え"></button>
   </div>
   <div class="bar__right">
     <label class="toggle">
@@ -44,7 +45,7 @@
     <div class="tools">
       <span id="currentTitle" class="tools__title">—</span>
       <div class="tools__actions">
-        <button id="pin" class="btn" aria-pressed="false" title="固定すると新しいターンが来ても切り替わりません">📌 ピン留め</button>
+        <button id="pin" class="btn" aria-pressed="false" title="固定すると、どのセッションの新しいターンが来ても切り替わりません">📌 ピン留め</button>
         <button id="download" class="btn" title="HTML をダウンロード">⬇ ダウンロード</button>
         <button id="export" class="btn" title="~/Desktop/codes/html-output に保存">💾 Desktop へ保存</button>
         <button id="copyPath" class="btn" title="絶対パスをコピー">📋 パス</button>
@@ -60,7 +61,7 @@
   </main>
 </div>
 
-<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<div id="toast" class="toast" role="status" aria-live="polite"><span id="toastText"></span><button id="toastAction" class="toast__btn" type="button" hidden></button></div>
 <script src="/viewer.js"></script>
 </body>
 </html>
