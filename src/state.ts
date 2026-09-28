@@ -26,6 +26,8 @@ export type Turn = {
   title: string;
   createdAt: string;
   updatedAt: string;
+  /** `/hview edit` で作り直した版なら、元にしたファイル名 */
+  revisionOf?: string;
 };
 
 export type SessionIndex = {
@@ -59,18 +61,22 @@ export function readMode(projectRoot: string): Mode {
  */
 export function writeMode(projectRoot: string, patch: Partial<Omit<Mode, 'updatedAt'>>): Mode {
   mkdirSync(hviewRoot(projectRoot), { recursive: true });
-  return withModeLock(projectRoot, () => {
+  return withFileLock(modeFile(projectRoot), () => {
     const next: Mode = {
       ...readMode(projectRoot),
       ...patch,
       updatedAt: new Date().toISOString(),
     };
-    const dest = modeFile(projectRoot);
-    const tmp = `${dest}.${process.pid}.tmp`;
-    writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
-    renameSync(tmp, dest);
+    writeJsonAtomic(modeFile(projectRoot), next);
     return next;
   });
+}
+
+/** 一時ファイル → rename で書く。途中の状態を他プロセスに読ませない。 */
+export function writeJsonAtomic(dest: string, value: unknown): void {
+  const tmp = `${dest}.${process.pid}.tmp`;
+  writeFileSync(tmp, `${JSON.stringify(value, null, 2)}\n`);
+  renameSync(tmp, dest);
 }
 
 const LOCK_TRIES = 50;
@@ -81,8 +87,8 @@ const LOCK_WAIT_MS = 20;
  * 取れないまま 1 秒待ったらロック無しで進める。プロセスがロックを持ったまま死んでも
  * 詰まらせないためで、その場合の最悪は従来と同じ挙動に戻るだけ。
  */
-function withModeLock<T>(projectRoot: string, fn: () => T): T {
-  const lock = `${modeFile(projectRoot)}.lock`;
+export function withFileLock<T>(target: string, fn: () => T): T {
+  const lock = `${target}.lock`;
   for (let i = 0; i < LOCK_TRIES; i++) {
     let fd: number;
     try {
@@ -129,7 +135,12 @@ export function writeIndex(projectRoot: string, index: SessionIndex): void {
  * 書き込まれた HTML を index.json に反映する。既出のファイルなら updatedAt だけ更新する。
  * 戻り値は反映後のターン。
  */
-export function recordTurn(projectRoot: string, sessionId: string, file: string): Turn {
+export function recordTurn(
+  projectRoot: string,
+  sessionId: string,
+  file: string,
+  extra: { revisionOf?: string } = {},
+): Turn {
   const index = readIndex(projectRoot, sessionId);
   const now = new Date().toISOString();
   const title = readTitle(join(sessionDir(projectRoot, sessionId), file)) ?? file;
@@ -139,6 +150,7 @@ export function recordTurn(projectRoot: string, sessionId: string, file: string)
   if (existing) {
     existing.title = title;
     existing.updatedAt = now;
+    if (extra.revisionOf) existing.revisionOf = extra.revisionOf;
     turn = existing;
   } else {
     turn = {
@@ -147,6 +159,7 @@ export function recordTurn(projectRoot: string, sessionId: string, file: string)
       title,
       createdAt: now,
       updatedAt: now,
+      ...(extra.revisionOf ? { revisionOf: extra.revisionOf } : {}),
     };
     index.turns.push(turn);
   }
@@ -164,6 +177,11 @@ export function turnNumberOf(file: string): number | null {
 /** 次に書かせるファイル名を決める。ここで採番しておくとモデルに推測させずに済む。 */
 export function nextTurnFile(projectRoot: string, sessionId: string, mode: OutputMode): string {
   if (mode === 'single-file') return 'current.html';
+  return nextPerTurnFile(projectRoot, sessionId);
+}
+
+/** 毎ターン新規モードの採番。`/hview edit` は元の版を残したいので、モードによらずこちらを使う。 */
+export function nextPerTurnFile(projectRoot: string, sessionId: string): string {
   const index = readIndex(projectRoot, sessionId);
   const max = index.turns.reduce((acc, t) => Math.max(acc, turnNumberOf(t.file) ?? 0), 0);
   return `turn-${String(max + 1).padStart(3, '0')}.html`;

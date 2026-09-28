@@ -1,8 +1,24 @@
 import { relative } from 'node:path';
-import { buildInjection, hasInlineMark, isHviewControlPrompt } from './instructions.ts';
-import { findProjectRoot, parseHviewPath } from './paths.ts';
+import {
+  clearPendingEditsOf,
+  otherOpenComments,
+  parseEditArg,
+  readComments,
+  resolveSessionPrefix,
+  resolveEditSource,
+  settlePendingEdit,
+  writePendingEdit,
+} from './comments.ts';
+import {
+  buildInjection,
+  buildNoCommentsNotice,
+  hasInlineMark,
+  isHviewControlPrompt,
+  parseHviewEditPrompt,
+} from './instructions.ts';
+import { findProjectRoot, parseHviewPath, sessionDir } from './paths.ts';
 import { resolvePort } from './server-info.ts';
-import { nextTurnFile, readMode } from './state.ts';
+import { nextPerTurnFile, nextTurnFile, readMode } from './state.ts';
 
 type HookPayload = {
   session_id?: string;
@@ -30,6 +46,9 @@ async function readStdin(): Promise<HookPayload> {
  * ただし hview 自体を操作するターンは例外で、常に素通しする。
  * この hook はスキルが `hview off` を走らせる前に評価されるため、
  * mode.json だけを見ていると OFF にするターンにまで注入してしまう。
+ *
+ * `/hview edit` だけは操作コマンドの中で唯一 HTML を書かせるターンなので、先に分岐する。
+ * コメントを取りに行くのをスキルに任せないのは、モデルが自分の session_id を知らないため。
  */
 export async function runUserPromptSubmitHook(): Promise<void> {
   const payload = await readStdin();
@@ -37,9 +56,18 @@ export async function runUserPromptSubmitHook(): Promise<void> {
   if (!sessionId) return;
 
   const prompt = payload.prompt ?? '';
+  const projectRoot = findProjectRoot(payload.cwd ?? process.cwd());
+
+  const edit = parseHviewEditPrompt(prompt);
+  if (edit) {
+    emit(buildEditContext(projectRoot, sessionId, edit.arg));
+    return;
+  }
+  // edit 以外のターンに入ったら、書かれずに終わった edit の予約は捨てる
+  clearPendingEditsOf(projectRoot, sessionId);
+
   if (isHviewControlPrompt(prompt)) return;
 
-  const projectRoot = findProjectRoot(payload.cwd ?? process.cwd());
   const mode = readMode(projectRoot);
   const inline = hasInlineMark(prompt);
   if (!mode.enabled && !inline) return;
@@ -55,6 +83,10 @@ export async function runUserPromptSubmitHook(): Promise<void> {
     port: resolvePort(projectRoot),
   });
 
+  emit(additionalContext);
+}
+
+function emit(additionalContext: string): void {
   process.stdout.write(
     `${JSON.stringify({
       hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext },
@@ -62,6 +94,62 @@ export async function runUserPromptSubmitHook(): Promise<void> {
   );
 }
 
+/**
+ * `/hview edit` の注入文を組み立てる。
+ * 既定は自セッションのコメントだけを見る。別セッションは `<session>/<turn>` で明示されたときだけ扱い、
+ * 空振りしたときは別セッションに残っているコメントを案内する（黙って無視すると、
+ * ビューアで別セッションの版を見ながらコメントした人が原因に気づけない）。
+ */
+function buildEditContext(projectRoot: string, owner: string, arg: string | null): string {
+  const port = resolvePort(projectRoot);
+  clearPendingEditsOf(projectRoot, owner);
+
+  const parsed = parseEditArg(arg);
+  let target = owner;
+  if (parsed.sessionPrefix) {
+    const resolved = resolveSessionPrefix(projectRoot, parsed.sessionPrefix);
+    if (!resolved) {
+      return buildNoCommentsNotice({
+        requested: `${parsed.sessionPrefix}/${parsed.file ?? ''}`,
+        reason: 'session',
+        port,
+        others: otherOpenComments(projectRoot, owner),
+      });
+    }
+    target = resolved;
+  }
+
+  const resolved = resolveEditSource(readComments(projectRoot, target), parsed.file);
+  if (!resolved) {
+    return buildNoCommentsNotice({
+      requested: parsed.file,
+      reason: 'empty',
+      port,
+      others: target === owner ? otherOpenComments(projectRoot, owner) : [],
+    });
+  }
+
+  // single-file モードでも新しいファイルに書かせる。上書きすると元の版と比べられない。
+  // 置き場所は元の版と同じセッション。ビューアで元の版の隣に並べ、revisionOf を辿れるようにする
+  const output = nextPerTurnFile(projectRoot, target);
+  const dir = relative(projectRoot, sessionDir(projectRoot, target));
+  writePendingEdit(projectRoot, target, {
+    owner,
+    source: resolved.source,
+    output,
+    commentIds: resolved.open.map((c) => c.id),
+    createdAt: new Date().toISOString(),
+  });
+
+  return buildInjection({
+    sessionId: owner,
+    relPath: `${dir}/${output}`,
+    outputMode: 'per-turn',
+    trigger: 'edit',
+    port,
+    edit: { sourceRelPath: `${dir}/${resolved.source}`, comments: resolved.open },
+  });
+}
 /**
  * PostToolUse hook（matcher: Write|Edit|MultiEdit）。
  * `.claude/hview/<session>/<file>.html` への書き込みだけをサーバへ通知する。
@@ -79,6 +167,9 @@ export async function runPostToolUseHook(): Promise<void> {
   const projectRoot = findProjectRoot(payload.cwd ?? process.cwd());
   const parsed = parseHviewPath(projectRoot, filePath);
   if (!parsed) return;
+
+  // サーバが落ちていても反映済みの記録は残したいので、通知より先に hook 自身で片付ける
+  settlePendingEdit(projectRoot, parsed.sessionId, parsed.file);
 
   const port = resolvePort(projectRoot);
   let res: Response;

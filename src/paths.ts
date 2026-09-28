@@ -102,6 +102,16 @@ export function indexFile(projectRoot: string, sessionId: string): string {
   return join(sessionDir(projectRoot, sessionId), 'index.json');
 }
 
+/** ビューアで付けたコメント。セッション単位で 1 ファイルにまとめる。 */
+export function commentsFile(projectRoot: string, sessionId: string): string {
+  return join(sessionDir(projectRoot, sessionId), 'comments.json');
+}
+
+/** `/hview edit` の hook が「どの版を、どこへ作り直させたか」を書き残す場所。 */
+export function pendingEditFile(projectRoot: string, sessionId: string): string {
+  return join(sessionDir(projectRoot, sessionId), 'pending-edit.json');
+}
+
 /** `.claude/hview/<session>/<file>.html` への書き込みかどうかを判定する。 */
 export function parseHviewPath(
   projectRoot: string,

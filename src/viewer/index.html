@@ -46,6 +46,7 @@
     <div class="tools">
       <span id="currentTitle" class="tools__title">—</span>
       <div class="tools__actions">
+        <button id="comment" class="btn" aria-pressed="false" title="要素を選んでコメントを付ける（Esc で終了）">💬 コメント</button>
         <button id="pin" class="btn" aria-pressed="false" title="固定すると、どのセッションの新しいターンが来ても切り替わりません">📌 ピン留め</button>
         <button id="download" class="btn" title="HTML をダウンロード">⬇ ダウンロード</button>
         <button id="export" class="btn" title="~/Desktop/codes/html-output に保存">💾 Desktop へ保存</button>
@@ -60,6 +61,36 @@
       </div>
     </div>
   </main>
+
+  <aside id="notes" class="notes" hidden aria-label="コメント">
+    <div class="side__head">
+      <span>コメント <span id="notesCount"></span></span>
+      <button id="notesClose" class="btn btn--ghost" title="コメントモードを終了（Esc）">閉じる</button>
+    </div>
+    <div class="notes__body">
+      <p class="hint notes__how">HTML 上の要素をクリックして選びます。<kbd>↑</kbd> で親要素に広げ、<kbd>↓</kbd> で戻せます。入力中は <kbd>Alt</kbd>+<kbd>↑</kbd>/<kbd>↓</kbd> で選び直せます。</p>
+      <button id="pageComment" class="btn notes__page" type="button">＋ ページ全体にコメント</button>
+
+      <form id="composer" class="composer" hidden>
+        <div id="composerTarget" class="composer__target"></div>
+        <textarea id="composerBody" rows="4" placeholder="どう直してほしいか（⌘/Ctrl + Enter で確定）"></textarea>
+        <div class="composer__actions">
+          <button id="composerCancel" class="btn" type="button">キャンセル</button>
+          <button class="btn btn--primary" type="submit">確定</button>
+        </div>
+      </form>
+
+      <ol id="noteList" class="note-list"></ol>
+      <details id="appliedWrap" class="applied" hidden>
+        <summary id="appliedSummary"></summary>
+        <ol id="appliedList" class="note-list note-list--applied"></ol>
+      </details>
+    </div>
+    <div class="notes__foot">
+      <p>Claude Code で次を実行すると、コメントを反映した新しい版を作ります。</p>
+      <button id="copyEdit" class="btn notes__cmd" type="button" title="コマンドをコピー"><code id="editCmd">/hview edit</code> 📋</button>
+    </div>
+  </aside>
 </div>
 
 <div id="toast" class="toast" role="status" aria-live="polite"><span id="toastText"></span><button id="toastAction" class="toast__btn" type="button" hidden></button></div>

@@ -24,6 +24,21 @@
     toast: $('toast'),
     toastText: $('toastText'),
     toastAction: $('toastAction'),
+    comment: $('comment'),
+    notes: $('notes'),
+    notesCount: $('notesCount'),
+    notesClose: $('notesClose'),
+    pageComment: $('pageComment'),
+    composer: $('composer'),
+    composerTarget: $('composerTarget'),
+    composerBody: $('composerBody'),
+    composerCancel: $('composerCancel'),
+    noteList: $('noteList'),
+    appliedWrap: $('appliedWrap'),
+    appliedSummary: $('appliedSummary'),
+    appliedList: $('appliedList'),
+    copyEdit: $('copyEdit'),
+    editCmd: $('editCmd'),
   };
 
   /** セッションセレクタの先頭に置く「追従」用の値。ref は `<projectId>/<sessionId>` なので衝突しない。 */
@@ -48,6 +63,16 @@
    *  bridge スクリプトの postMessage で受け取った値をここに溜める。 */
   const scrollMemory = new Map();
   let pendingRestore = null;
+  /** コメントモード中。インスペクターが動き、右にコメント欄が出る */
+  let commenting = false;
+  /** 書きかけのコメントの対象。undefined は未選択、null はページ全体 */
+  let draftTarget = undefined;
+
+  /** 表示を勝手に切り替えない状態か。コメントモード中に切り替えると書きかけが消える */
+  function locked() { return pinned || commenting; }
+  function lockReason() {
+    return pinned ? '（ピン留め中のため切り替えません）' : '（コメント中のため切り替えません）';
+  }
 
   // ---------- 通信 ----------
 
@@ -137,13 +162,17 @@
     renderSessions();
     renderMode();
     renderTurns(session);
+    renderNotes();
 
     if (!session) { showPlaceholder(); return; }
 
     // 選択中セッションに新しいターンが来たとき。ピン留め中は切り替えない
     if (turn && turn.projectId === session.projectId && turn.sessionId === session.sessionId) {
-      if (pinned && currentFile && currentFile !== turn.turn.file) {
-        toast(`新しいターン「${turn.turn.title}」が届きました（ピン留め中のため切り替えません）`);
+      if (locked() && currentFile && currentFile !== turn.turn.file) {
+        toast(`新しいターン「${turn.turn.title}」が届きました${lockReason()}`, {
+          label: '表示',
+          run: () => show(turn.turn.file),
+        });
       } else {
         show(turn.turn.file, { keepScroll: turn.turn.file === currentFile });
       }
@@ -171,14 +200,14 @@
       unread.delete(r);
       return;
     }
-    if (follow && !pinned) {
+    if (follow && !locked()) {
       sel = { projectId: msg.projectId, sessionId: msg.sessionId };
       currentFile = null; // 別セッションのファイルなのでスクロール位置は引き継がない
       unread.delete(r);
       return;
     }
     unread.add(r);
-    const why = pinned ? '（ピン留め中のため切り替えません）' : '';
+    const why = locked() ? lockReason() : '';
     toast(
       `${describe(msg.projectId, msg.sessionId)} に新しいターン「${msg.turn.title}」が届きました${why}`,
       { label: '切り替え', run: () => selectSession(r) },
@@ -327,9 +356,10 @@
           hour: '2-digit',
           minute: '2-digit',
         });
+        const rev = t.revisionOf ? ` · ← ${esc(t.revisionOf)} を修正` : '';
         return `<li><button type="button" data-file="${esc(t.file)}">
           <span class="t__title">${esc(t.title)}</span>
-          <span class="t__meta">#${t.n} · ${time} · ${esc(t.file)}</span>
+          <span class="t__meta">#${t.n} · ${time} · ${esc(t.file)}${rev}</span>
         </button></li>`;
       })
       .join('');
@@ -350,12 +380,14 @@
     if (!session) return showPlaceholder();
     const keepScroll = !!(opts && opts.keepScroll);
     pendingRestore = keepScroll ? scrollMemory.get(key(session, file)) || 0 : 0;
+    if (file !== currentFile) closeComposer();
     currentFile = file;
     el.preview.hidden = false;
     el.placeholder.hidden = true;
     // 同じ URL でも確実に読み直させたいのでキャッシュバスターを付ける
     el.preview.src = `${filePath('/f/', session, file)}?t=${Date.now()}`;
     markCurrent();
+    renderNotes();
   }
 
   function filePath(prefix, session, file) {
@@ -389,11 +421,172 @@
       scrollMemory.set(key(session, currentFile), d.y);
     }
     if (d.type === 'ready' && pendingRestore) {
-      el.preview.contentWindow.postMessage(
-        { __hview: true, type: 'restoreScroll', y: pendingRestore },
-        '*',
-      );
+      toFrame({ type: 'restoreScroll', y: pendingRestore });
       pendingRestore = null;
+    }
+    // 読み直した iframe はインスペクターの状態を持っていないので、毎回伝え直す
+    if (d.type === 'ready' && commenting) syncInspector();
+    if (d.type === 'pick' && commenting && d.target) openComposer(d.target);
+    if (d.type === 'inspectExit') onEscape();
+  });
+
+  function toFrame(msg) {
+    if (el.preview.contentWindow) el.preview.contentWindow.postMessage({ __hview: true, ...msg }, '*');
+  }
+
+  // ---------- コメント ----------
+
+  function currentComments() {
+    const session = currentSession();
+    if (!session || !currentFile) return [];
+    return (session.comments || []).filter((c) => c.file === currentFile);
+  }
+
+  function openComments() { return currentComments().filter((c) => c.status === 'open'); }
+
+  function syncInspector() {
+    const markers = openComments()
+      .map((c, i) => (c.target ? { n: i + 1, selector: c.target.selector } : null))
+      .filter(Boolean);
+    toFrame({ type: 'inspect', on: commenting, markers });
+  }
+
+  function setCommenting(on) {
+    if (on && !currentFile) return;
+    commenting = on;
+    el.comment.setAttribute('aria-pressed', String(on));
+    el.notes.hidden = !on;
+    if (!on) closeComposer();
+    syncInspector();
+    renderNotes();
+  }
+
+  function targetLabel(t) {
+    if (!t) return 'ページ全体';
+    const text = t.text ? ` 「${t.text.slice(0, 40)}${t.text.length > 40 ? '…' : ''}」` : '';
+    return `<${t.tag}>${text}`;
+  }
+
+  function openComposer(target) {
+    draftTarget = target;
+    el.composer.hidden = false;
+    el.composerTarget.textContent = `対象: ${targetLabel(target)}`;
+    if (target) el.composerTarget.title = target.selector;
+    else el.composerTarget.removeAttribute('title');
+    el.composerBody.focus();
+  }
+
+  function closeComposer() {
+    draftTarget = undefined;
+    el.composer.hidden = true;
+    el.composerBody.value = '';
+    toFrame({ type: 'clearSelection' });
+  }
+
+  async function submitComposer() {
+    const session = currentSession();
+    const body = el.composerBody.value.trim();
+    if (!session || !currentFile || draftTarget === undefined) return;
+    if (!body) { el.composerBody.focus(); return; }
+    const r = await post('/api/comments', {
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+      file: currentFile,
+      target: draftTarget,
+      body,
+    }).catch(() => ({ ok: false }));
+    if (!r.ok) { toast('コメントを保存できませんでした。サーバの状態を確認してください'); return; }
+    // 一覧は WS の broadcast で届く state から描き直す
+    closeComposer();
+  }
+
+  function renderNotes() {
+    if (!commenting) return;
+    const all = currentComments();
+    const open = all.filter((c) => c.status === 'open');
+    const applied = all.filter((c) => c.status === 'applied');
+    el.notesCount.textContent = open.length ? `(${open.length})` : '';
+    el.noteList.innerHTML = open.map((c, i) => noteItem(c, i + 1, true)).join('');
+    el.appliedWrap.hidden = applied.length === 0;
+    el.appliedSummary.textContent = `反映済み ${applied.length} 件`;
+    el.appliedList.innerHTML = applied.map((c, i) => noteItem(c, i + 1, false)).join('');
+    el.editCmd.textContent = editCommand();
+    syncInspector();
+  }
+
+  /**
+   * ビューアからは `/hview edit` を打つ Claude のセッションが分からないので、
+   * どのセッションで打っても同じ版を指すようにセッション ID の先頭を必ず付ける。
+   */
+  function editCommand() {
+    const session = currentSession();
+    if (!session || !currentFile) return '/hview edit';
+    const m = /^turn-(\d+)\.html$/.exec(currentFile);
+    const turn = m ? String(Number(m[1])) : currentFile.replace(/\.html$/, '');
+    return `/hview edit ${session.sessionId.slice(0, 8)}/${turn}`;
+  }
+
+  function noteItem(c, n, deletable) {
+    const where = c.appliedIn ? ` → ${esc(c.appliedIn)} で反映` : '';
+    return `<li>
+      <span class="note__n${c.target ? '' : ' note__n--page'}">${n}</span>
+      <span class="note__target" title="${esc(c.target ? c.target.selector : '')}">${esc(targetLabel(c.target))}${where}</span>
+      <span class="note__body">${esc(c.body)}</span>
+      ${deletable ? `<button class="note__del" type="button" data-id="${esc(c.id)}" title="削除">×</button>` : ''}
+    </li>`;
+  }
+
+  /** Esc は内側から閉じる。書きかけがあればまずそれだけを捨てる */
+  function onEscape() {
+    if (!commenting) return;
+    if (draftTarget !== undefined) closeComposer();
+    else setCommenting(false);
+  }
+
+  el.comment.addEventListener('click', () => setCommenting(!commenting));
+  el.notesClose.addEventListener('click', () => setCommenting(false));
+  el.pageComment.addEventListener('click', () => openComposer(null));
+  el.composerCancel.addEventListener('click', closeComposer);
+  el.composer.addEventListener('submit', (e) => { e.preventDefault(); submitComposer(); });
+  el.composerBody.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) { e.preventDefault(); submitComposer(); }
+    // 書きながら対象を広げ直せるように。素の矢印はカーソル移動に使うので Alt 付きだけ
+    if (e.altKey && draftTarget && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      e.preventDefault();
+      toFrame({ type: 'key', key: e.key, repick: true });
+    }
+  });
+
+  el.noteList.addEventListener('click', async (e) => {
+    const btn = e.target.closest('button[data-id]');
+    const session = currentSession();
+    if (!btn || !session) return;
+    const r = await post('/api/comments/delete', {
+      projectId: session.projectId,
+      sessionId: session.sessionId,
+      id: btn.dataset.id,
+    })
+      .catch(() => ({ ok: false }));
+    if (!r.ok) toast('削除できませんでした');
+  });
+
+  el.copyEdit.addEventListener('click', async () => {
+    const cmd = el.editCmd.textContent;
+    try {
+      await navigator.clipboard.writeText(cmd);
+      toast(`コピーしました: ${cmd}`);
+    } catch {
+      toast(`コピーできませんでした。手動でどうぞ: ${cmd}`);
+    }
+  });
+
+  addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { onEscape(); return; }
+    // フォーカスが親にあるとき、iframe 内のハイライトを矢印キーで動かせるように転送する
+    const focused = /^(TEXTAREA|INPUT|SELECT|BUTTON|SUMMARY)$/.test(document.activeElement && document.activeElement.tagName);
+    if (commenting && !focused && ['ArrowUp', 'ArrowDown', 'Enter'].includes(e.key)) {
+      e.preventDefault();
+      toFrame({ type: 'key', key: e.key });
     }
   });
 
@@ -466,7 +659,7 @@
 
   el.print.addEventListener('click', () => {
     if (!currentFile) return;
-    el.preview.contentWindow.postMessage({ __hview: true, type: 'print' }, '*');
+    toFrame({ type: 'print' });
   });
 
   el.reindex.addEventListener('click', async () => {
