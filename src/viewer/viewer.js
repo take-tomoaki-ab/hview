@@ -30,6 +30,10 @@
   const FOLLOW = '__follow__';
   const FOLLOW_KEY = 'hview.follow';
 
+  /** セレクタ（`.select` は max-width 22rem）に収まる見出しの長さ。全角前提で見積もっている。 */
+  const TITLE_MAX = 24;
+  const FOLLOW_TITLE_MAX = 12;
+
   /** @type {{port:number, projectRoot:string, projectId:string, exportDir:string, projects:any[]}|null} */
   let state = null;
   /** 選択中のセッション。プロジェクトをまたぐので projectId と対で持つ。 */
@@ -217,9 +221,12 @@
       return;
     }
 
-    const followLabel = `⟳ 最新を自動で追う（${short(sel && sel.sessionId)}）`;
+    // 追従したときに映るのは選択中ではなく、全プロジェクトで最も新しいセッション
+    const latest = allSessions()[0];
+    // 「⟳ 最新を自動で追う（）」の分だけ前置きが長いので、タイトルは他より短く詰める
+    const followLabel = `⟳ 最新を自動で追う（${sessionLabel(latest, FOLLOW_TITLE_MAX)}）`;
     const options = [
-      `<option value="${FOLLOW}"${follow ? ' selected' : ''}>${esc(followLabel)}</option>`,
+      `<option value="${FOLLOW}" title="${esc(sessionHint(latest))}"${follow ? ' selected' : ''}>${esc(followLabel)}</option>`,
     ];
 
     // プロジェクトが複数あるときは optgroup で束ねる。どのプロジェクトのセッションか分からないと選べない
@@ -236,9 +243,38 @@
   function sessionOption(p, s) {
     const r = ref(p.projectId, s.sessionId);
     const mark = unread.has(r) ? '● ' : '';
-    const label = `${mark}${short(s.sessionId)} (${s.turns.length} ターン)`;
+    const label = `${mark}${sessionLabel(s)} (${s.turns.length} ターン)`;
     const selected = !follow && sel && r === ref(sel.projectId, sel.sessionId) ? ' selected' : '';
-    return `<option value="${esc(r)}"${selected}>${esc(label)}</option>`;
+    return `<option value="${esc(r)}" title="${esc(sessionHint(s))}"${selected}>${esc(label)}</option>`;
+  }
+
+  /**
+   * 最新ターンの HTML タイトル。turns は n の昇順なので末尾が最新。
+   * `<title>` が無いターンは title にファイル名が入っているので、それは「無し」として扱う。
+   */
+  function latestTitle(session) {
+    const turns = session ? session.turns : null;
+    const latest = turns && turns.length ? turns[turns.length - 1] : null;
+    if (!latest || latest.title === latest.file) return null;
+    return String(latest.title).replace(/\s+/g, ' ').trim() || null;
+  }
+
+  /** セレクタに出す見出し。タイトルが取れないセッションは短縮 ID にフォールバック。 */
+  function sessionLabel(session, max) {
+    const title = latestTitle(session);
+    return title ? clip(title, max) : short(session ? session.sessionId : null);
+  }
+
+  /** 同名タイトルのセッションを見分けられるよう、省略前のタイトルと完全な ID はホバーに残す。 */
+  function sessionHint(session) {
+    if (!session) return '';
+    const title = latestTitle(session);
+    return title ? `${title}\n${session.sessionId}` : session.sessionId;
+  }
+
+  /** `<option>` には text-overflow が効かないので、文字数で打ち切る。 */
+  function clip(s, max = TITLE_MAX) {
+    return s.length > max ? `${s.slice(0, max - 1)}…` : s;
   }
 
   /** セレクタは畳まれていると未読が見えないので、隣にバッジも出す。 */
