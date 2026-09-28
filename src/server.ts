@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import type { ServerWebSocket } from 'bun';
 import { injectBridge, PREVIEW_CSP } from './bridge.ts';
+import { addComment, deleteComment, readComments } from './comments.ts';
 import {
   DEFAULT_EXPORT_DIR,
   hviewRoot,
@@ -95,6 +96,7 @@ export function startServer(options: ServeOptions) {
       ...s,
       projectId: id,
       turns: readIndex(root, s.sessionId).turns,
+      comments: readComments(root, s.sessionId),
     })),
   });
 
@@ -243,6 +245,43 @@ export function startServer(options: ServeOptions) {
         writeFileSync(dest, content);
         if (!options.quiet) console.log(`[hview] exported → ${dest}`);
         return json({ ok: true, path: dest });
+      }
+
+      if (req.method === 'POST' && path === '/api/comments') {
+        const body = (await req.json().catch(() => ({}))) as {
+          projectId?: string;
+          sessionId?: string;
+          file?: string;
+          target?: unknown;
+          body?: unknown;
+        };
+        const root = targetRoot(body);
+        if (!body.sessionId || !body.file || !root || !resolveTurnFile(root, body.sessionId, body.file)) {
+          return json({ ok: false, error: 'bad request' }, 400);
+        }
+        const comment = addComment(root, body.sessionId, {
+          file: body.file,
+          target: body.target,
+          body: body.body,
+        });
+        if (!comment) return json({ ok: false, error: 'empty comment' }, 400);
+        broadcast({ type: 'comments', projectId: projectId(root), state: snapshot() });
+        return json({ ok: true, comment });
+      }
+
+      if (req.method === 'POST' && path === '/api/comments/delete') {
+        const body = (await req.json().catch(() => ({}))) as {
+          projectId?: string;
+          sessionId?: string;
+          id?: string;
+        };
+        const root = targetRoot(body);
+        if (!root || !body.sessionId || !body.id || !isSafeSegment(body.sessionId)) {
+          return json({ ok: false, error: 'bad request' }, 400);
+        }
+        const ok = deleteComment(root, body.sessionId, body.id);
+        if (ok) broadcast({ type: 'comments', projectId: projectId(root), state: snapshot() });
+        return json({ ok }, ok ? 200 : 404);
       }
 
       if (req.method === 'POST' && path === '/api/reindex') {

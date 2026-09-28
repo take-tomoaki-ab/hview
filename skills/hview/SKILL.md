@@ -1,6 +1,6 @@
 ---
 name: hview
-description: Claude Code の回答を図つき単一ファイル HTML で返すモード（hview）を ON / OFF する。「/hview on」「/hview off」「hview を有効にして」「HTML モードを切って」などで起動する。ブラウザの hview ビューアに回答がライブ表示される。
+description: Claude Code の回答を図つき単一ファイル HTML で返すモード（hview）を ON / OFF する。また「/hview edit」で、ビューア上で付けたコメントを反映した新しい版の HTML を作る。「/hview on」「/hview off」「/hview edit」「hview を有効にして」「HTML モードを切って」などで起動する。ブラウザの hview ビューアに回答がライブ表示される。
 ---
 
 # hview モードの切り替え
@@ -19,8 +19,18 @@ description: Claude Code の回答を図つき単一ファイル HTML で返す�
 | `/hview` / 「今どうなってる？」 | `hview status` |
 | 「毎ターン新しいファイルにして」 | `hview mode per-turn` |
 | 「同じファイルを更新して」 | `hview mode single-file` |
+| `/hview edit` / `/hview edit turn-003` | コマンドは実行しない（下の「コメントの反映」を参照） |
 
 `hview` コマンドが PATH に無い場合は、リポジトリの `bin/hview` を絶対パスで叩いてください。
+
+## コメントの反映（`/hview edit`）
+
+ビューアの「💬 コメント」で HTML の要素やページ全体に付けたコメントを、新しい版の HTML に反映します。
+対象の版、コメントの一覧、書き出し先は `UserPromptSubmit` hook が `<hview-instructions>` として注入します。
+**このスキルからコマンドを実行したり、comments.json を自分で読みに行ったりせず、注入された指示に従ってください。**
+モデルは自分の session_id を知らないため、どのセッションのコメントかを自力では正しく決められません。
+
+注入が見当たらない場合は hook が未登録です。`hview install-hooks` を実行して Claude Code を再起動するよう案内してください。
 
 ## 実行したあとに伝えること
 
